@@ -14,6 +14,8 @@ pub struct SkypeAuth {
     pub expires_at: DateTime<Utc>,
     /// Region-specific messaging host, e.g. `https://emea.ng.msg.teams.microsoft.com`.
     pub messaging_host: String,
+    /// Region code (e.g. `emea`) used in middle-tier endpoint paths.
+    pub region: String,
 }
 
 impl SkypeAuth {
@@ -66,12 +68,31 @@ pub async fn fetch_skype_auth(http: &reqwest::Client, bearer: &str) -> Result<Sk
     };
 
     let messaging_host = messaging_host_from(&parsed);
+    let region = region_from(&parsed, &messaging_host);
 
     Ok(SkypeAuth {
         skype_token: parsed.tokens.skype_token,
         expires_at: Utc::now() + Duration::seconds(ttl.max(0)),
         messaging_host,
+        region,
     })
+}
+
+/// The region code (lowercase), preferring the explicit `region` field and
+/// falling back to the messaging host's subdomain (e.g. `emea` from
+/// `https://emea.ng.msg.teams.microsoft.com`).
+fn region_from(resp: &AuthzResponse, messaging_host: &str) -> String {
+    if let Some(region) = &resp.region {
+        let r = region.trim().to_lowercase();
+        if !r.is_empty() {
+            return r;
+        }
+    }
+    messaging_host
+        .strip_prefix("https://")
+        .and_then(|h| h.split('.').next())
+        .unwrap_or("emea")
+        .to_string()
 }
 
 /// Determine the messaging host. Prefer scanning `regionGtms` for the actual

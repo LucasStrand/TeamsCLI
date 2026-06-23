@@ -35,6 +35,10 @@ pub const AUTHZ_URL: &str = "https://teams.microsoft.com/api/authsvc/v1.0/authz"
 /// Chat service aggregator base — lists the user's chats and teams.
 pub const CSA_BASE: &str = "https://teams.microsoft.com/api/csa/api/v1";
 
+/// Middle-tier base — used to resolve user MRIs to display names. The region
+/// segment is appended at runtime: `{MT_BASE}/{region}/beta/...`.
+pub const MT_BASE: &str = "https://teams.microsoft.com/api/mt";
+
 /// Fallback messaging host if the region cannot be determined from the authz
 /// response. The real host is region-specific (e.g. emea/amer/apac).
 pub const DEFAULT_MESSAGING_HOST: &str = "https://emea.ng.msg.teams.microsoft.com";

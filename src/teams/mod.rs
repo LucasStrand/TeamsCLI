@@ -10,6 +10,7 @@ mod authz;
 pub mod conversations;
 pub mod messages;
 pub mod models;
+pub mod profiles;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -117,13 +118,21 @@ impl TeamsClient {
         Ok(sa)
     }
 
+    /// The region code used in middle-tier endpoint paths.
+    async fn region(&self) -> Result<String> {
+        Ok(self.skype_auth().await?.region)
+    }
+
     /// Issue a request with host-appropriate auth headers and retry on
-    /// throttling / transient errors.
+    /// throttling / transient errors. For non-messaging hosts the bearer token
+    /// is issued for `bearer_resource` (CSA and the middle tier need different
+    /// audiences); the messaging host uses the skypetoken only.
     async fn send(
         &self,
         method: reqwest::Method,
         url: &str,
         body: Option<Vec<u8>>,
+        bearer_resource: &str,
     ) -> Result<Vec<u8>> {
         let mut attempt = 0;
         loop {
@@ -138,9 +147,9 @@ impl TeamsClient {
                     .header(reqwest::header::AUTHORIZATION, &skype_header)
                     .header("Authentication", &skype_header);
             } else {
-                // CSA host needs a bearer for the chatsvcagg resource plus the
-                // skypetoken side-channel.
-                let bearer = self.bearer(config::CHATSVCAGG_RESOURCE).await?;
+                // CSA / middle-tier hosts need a bearer for the right resource
+                // plus the skypetoken side-channel.
+                let bearer = self.bearer(bearer_resource).await?;
                 req = req
                     .bearer_auth(&bearer)
                     .header("Authentication", &skype_header);
@@ -178,13 +187,16 @@ impl TeamsClient {
         }
     }
 
-    async fn get_json<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
-        let bytes = self.send(reqwest::Method::GET, url, None).await?;
+    async fn get_json<T: DeserializeOwned>(&self, url: &str, bearer_resource: &str) -> Result<T> {
+        let bytes = self
+            .send(reqwest::Method::GET, url, None, bearer_resource)
+            .await?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    async fn post_bytes(&self, url: &str, body: Vec<u8>) -> Result<Vec<u8>> {
-        self.send(reqwest::Method::POST, url, Some(body)).await
+    async fn post_bytes(&self, url: &str, body: Vec<u8>, bearer_resource: &str) -> Result<Vec<u8>> {
+        self.send(reqwest::Method::POST, url, Some(body), bearer_resource)
+            .await
     }
 
     /// The region-specific messaging host (for building message URLs).

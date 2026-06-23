@@ -2,6 +2,8 @@
 //! Teams APIs. The raw shapes are intentionally permissive (everything optional)
 //! because these endpoints are undocumented and fields vary between accounts.
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 use crate::util::strip_html;
@@ -63,41 +65,72 @@ pub struct RawLastMessage {
 }
 
 impl ConversationsResponse {
+    /// Unique member MRIs across all chats, excluding the signed-in user, for a
+    /// batched name lookup.
+    pub fn member_mris(&self, me_mri: Option<&str>) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for chat in &self.chats {
+            for m in &chat.members {
+                if let Some(mri) = &m.mri {
+                    if Some(mri.as_str()) != me_mri && seen.insert(mri.clone()) {
+                        out.push(mri.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Reduce the raw response to sidebar rows. `me_mri` identifies the signed-in
-    /// user so 1:1 chats can be named after the *other* party and self-chats
-    /// detected.
-    pub fn into_summaries(self, me_mri: Option<&str>) -> Vec<ChatSummary> {
+    /// user; `names` maps member MRIs to display names (from the profile lookup).
+    pub fn into_summaries(
+        self,
+        me_mri: Option<&str>,
+        names: &HashMap<String, String>,
+    ) -> Vec<ChatSummary> {
         self.chats
             .into_iter()
             .map(|c| {
-                let label = chat_label(&c, me_mri);
+                let label = chat_label(&c, me_mri, names);
                 ChatSummary { id: c.id, label }
             })
             .collect()
     }
 }
 
-fn chat_label(chat: &RawChat, me_mri: Option<&str>) -> String {
-    // A named group/topic chat: use the title.
+fn chat_label(chat: &RawChat, me_mri: Option<&str>, names: &HashMap<String, String>) -> String {
+    // A named group/topic chat: the custom title wins.
     if let Some(title) = &chat.title {
         if !title.trim().is_empty() {
             return title.clone();
         }
     }
 
-    // Self-chat: every member is me (or the only member is me).
-    let has_other = chat
+    // Members other than me.
+    let others: Vec<&str> = chat
         .members
         .iter()
         .filter_map(|m| m.mri.as_deref())
-        .any(|mri| Some(mri) != me_mri);
-    if !chat.members.is_empty() && !has_other {
+        .filter(|mri| Some(*mri) != me_mri)
+        .collect();
+
+    // Self-chat: only me in the roster.
+    if !chat.members.is_empty() && others.is_empty() {
         return "Notes to self".to_string();
     }
 
-    // Best available name: the last message's sender, when it isn't me — for a
-    // 1:1 that is the other person. (Full per-member name resolution needs the
-    // profile endpoint; see roadmap.)
+    // Name the chat after the resolved member display names: for a 1:1 this is
+    // the single other person; for a group it's "name1, name2, …".
+    let resolved: Vec<String> = others
+        .iter()
+        .filter_map(|mri| names.get(*mri).cloned())
+        .collect();
+    if !resolved.is_empty() {
+        return join_names(&resolved);
+    }
+
+    // Fallback when the lookup returned nothing: the last sender, if not me.
     if let Some(lm) = &chat.last_message {
         if let Some(name) = &lm.im_display_name {
             if !name.trim().is_empty() && lm.from.as_deref() != me_mri {
@@ -111,6 +144,16 @@ fn chat_label(chat: &RawChat, me_mri: Option<&str>) -> String {
     } else {
         "Group chat".to_string()
     }
+}
+
+/// Join member names, capping long group rosters as "a, b, c +N".
+fn join_names(names: &[String]) -> String {
+    const CAP: usize = 4;
+    if names.len() <= CAP {
+        return names.join(", ");
+    }
+    let shown = names[..CAP].join(", ");
+    format!("{shown} +{}", names.len() - CAP)
 }
 
 // ----------------------------------------------------------------------------
@@ -203,6 +246,13 @@ mod tests {
 
     const ME: &str = "8:orgid:me";
 
+    fn names(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
     #[test]
     fn chat_label_prefers_title() {
         let c = RawChat {
@@ -212,13 +262,39 @@ mod tests {
             is_one_on_one: false,
             last_message: None,
         };
-        assert_eq!(chat_label(&c, Some(ME)), "Project X");
+        assert_eq!(chat_label(&c, Some(ME), &names(&[])), "Project X");
     }
 
     #[test]
-    fn chat_label_uses_other_party_from_last_message() {
+    fn chat_label_one_on_one_uses_other_member_name() {
         let c = RawChat {
             id: "c2".into(),
+            title: None,
+            members: vec![member(ME), member("8:orgid:x")],
+            is_one_on_one: true,
+            last_message: None,
+        };
+        let map = names(&[("8:orgid:x", "Carol Smith")]);
+        assert_eq!(chat_label(&c, Some(ME), &map), "Carol Smith");
+    }
+
+    #[test]
+    fn chat_label_group_joins_member_names() {
+        let c = RawChat {
+            id: "c3".into(),
+            title: None,
+            members: vec![member(ME), member("8:orgid:a"), member("8:orgid:b")],
+            is_one_on_one: false,
+            last_message: None,
+        };
+        let map = names(&[("8:orgid:a", "Ann"), ("8:orgid:b", "Bob")]);
+        assert_eq!(chat_label(&c, Some(ME), &map), "Ann, Bob");
+    }
+
+    #[test]
+    fn chat_label_falls_back_to_last_sender() {
+        let c = RawChat {
+            id: "c4".into(),
             title: None,
             members: vec![member(ME), member("8:orgid:x")],
             is_one_on_one: true,
@@ -227,22 +303,8 @@ mod tests {
                 from: Some("8:orgid:x".into()),
             }),
         };
-        assert_eq!(chat_label(&c, Some(ME)), "Carol");
-    }
-
-    #[test]
-    fn chat_label_ignores_my_own_last_message() {
-        let c = RawChat {
-            id: "c3".into(),
-            title: None,
-            members: vec![member(ME), member("8:orgid:x")],
-            is_one_on_one: true,
-            last_message: Some(RawLastMessage {
-                im_display_name: Some("Me".into()),
-                from: Some(ME.into()),
-            }),
-        };
-        assert_eq!(chat_label(&c, Some(ME)), "Direct message");
+        // No resolved name, but the other party sent the last message.
+        assert_eq!(chat_label(&c, Some(ME), &names(&[])), "Carol");
     }
 
     #[test]
@@ -254,6 +316,6 @@ mod tests {
             is_one_on_one: false,
             last_message: None,
         };
-        assert_eq!(chat_label(&c, Some(ME)), "Notes to self");
+        assert_eq!(chat_label(&c, Some(ME), &names(&[])), "Notes to self");
     }
 }

@@ -15,7 +15,14 @@ impl TeamsClient {
             "{}/teams/users/me?isPrefetch=false&enableMembershipSummary=true",
             config::CSA_BASE
         );
-        let bytes = self.send(reqwest::Method::GET, &url, None).await?;
+        let bytes = self
+            .send(
+                reqwest::Method::GET,
+                &url,
+                None,
+                config::CHATSVCAGG_RESOURCE,
+            )
+            .await?;
         // Log the raw payload (debug only) so chat-label field mapping can be
         // verified/tuned against real responses. Enable with TEAMSCLI_LOG=debug.
         tracing::debug!(
@@ -23,6 +30,11 @@ impl TeamsClient {
             String::from_utf8_lossy(&bytes)
         );
         let resp: ConversationsResponse = serde_json::from_slice(&bytes)?;
-        Ok(resp.into_summaries(self.me_mri()))
+
+        // Resolve member MRIs to display names so 1:1 and group chats are named
+        // after their participants.
+        let me = self.me_mri().map(|s| s.to_string());
+        let names = self.resolve_names(&resp.member_mris(me.as_deref())).await;
+        Ok(resp.into_summaries(me.as_deref(), &names))
     }
 }

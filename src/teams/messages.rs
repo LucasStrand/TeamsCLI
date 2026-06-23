@@ -5,6 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use serde::Serialize;
 
+use crate::config;
+
 use super::models::{Message, MessagesResponse};
 use super::TeamsClient;
 
@@ -17,7 +19,8 @@ impl TeamsClient {
             "{host}/v1/users/ME/conversations/{id}/messages\
              ?view=msnp24Equivalent%7CsupportsMessageProperties&pageSize=50&startTime=1"
         );
-        let resp: MessagesResponse = self.get_json(&url).await?;
+        // Messaging host uses the skypetoken; the bearer resource is unused.
+        let resp: MessagesResponse = self.get_json(&url, config::SKYPE_RESOURCE).await?;
         Ok(resp.into_messages())
     }
 
@@ -34,7 +37,7 @@ impl TeamsClient {
             clientmessageid: new_client_message_id(),
         };
         let bytes = serde_json::to_vec(&body)?;
-        self.post_bytes(&url, bytes).await?;
+        self.post_bytes(&url, bytes, config::SKYPE_RESOURCE).await?;
         Ok(())
     }
 }
