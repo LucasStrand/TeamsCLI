@@ -11,7 +11,7 @@ use ratatui::Frame;
 
 use crate::app::{App, Mode};
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -60,7 +60,7 @@ fn draw_chat_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_right(f: &mut Frame, app: &App, area: Rect) {
+fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(3)])
@@ -70,7 +70,7 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect) {
     draw_composer(f, app, rows[1]);
 }
 
-fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
+fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     let title = match &app.active_chat {
         Some(_) => {
             let name = app
@@ -84,9 +84,8 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
         None => " Messages ".to_string(),
     };
 
-    let block = Block::default().borders(Borders::ALL).title(title);
-
     if app.active_chat.is_none() {
+        let block = Block::default().borders(Borders::ALL).title(title);
         let hint = Paragraph::new("Select a chat and press Enter to open it.")
             .block(block)
             .style(Style::default().fg(theme::MUTED));
@@ -119,14 +118,30 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
         )));
     }
 
-    // Keep the most recent messages in view by scrolling to the bottom.
+    // `area.height - 2` accounts for the top/bottom borders.
     let visible = area.height.saturating_sub(2) as usize;
-    let scroll = lines.len().saturating_sub(visible) as u16;
+    let max_scroll = lines.len().saturating_sub(visible) as u16;
+
+    // Clamp the user's scroll offset (lines up from the bottom) to the real
+    // maximum, writing it back so over-scroll doesn't accumulate.
+    if app.msg_scroll > max_scroll {
+        app.msg_scroll = max_scroll;
+    }
+    // Default view is pinned to the bottom (newest); msg_scroll moves it up.
+    let top = max_scroll.saturating_sub(app.msg_scroll);
+
+    let scrolled = app.msg_scroll > 0;
+    let title = if scrolled {
+        format!("{title}↑ ")
+    } else {
+        title
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
 
     let para = Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .scroll((top, 0));
     f.render_widget(para, area);
 }
 
@@ -182,13 +197,16 @@ fn draw_help(f: &mut Frame, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("  j / ↓      move down (opens chat automatically)"),
-        Line::from("  k / ↑      move up"),
-        Line::from("  /          search / filter chats"),
-        Line::from("  i          compose a message"),
-        Line::from("  Esc        cancel compose / clear filter"),
-        Line::from("  ?          toggle this help"),
-        Line::from("  q / Ctrl-C quit"),
+        Line::from("  j / ↓        move down (opens chat automatically)"),
+        Line::from("  k / ↑        move up"),
+        Line::from("  PgUp / PgDn  scroll messages (or mouse wheel)"),
+        Line::from("  Ctrl-U/D     scroll messages up / down"),
+        Line::from("  Home / End   jump to oldest / newest"),
+        Line::from("  /            search / filter chats"),
+        Line::from("  i            compose a message"),
+        Line::from("  Esc          cancel compose / clear filter"),
+        Line::from("  ?            toggle this help"),
+        Line::from("  q / Ctrl-C   quit"),
         Line::from(""),
         Line::from(Span::styled(
             "  press any key to close",

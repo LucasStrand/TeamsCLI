@@ -75,12 +75,15 @@ cached, so subsequent launches sign you in silently.
 
 | Key | Action |
 |-----|--------|
-| `j` / `↓` | Move down the chat list |
+| `j` / `↓` | Move down the chat list (opens the chat automatically) |
 | `k` / `↑` | Move up the chat list |
-| `Enter` | Open the selected chat |
+| `PgUp` / `PgDn` | Scroll messages (also mouse wheel) |
+| `Ctrl-U` / `Ctrl-D` | Scroll messages up / down |
+| `Home` / `End` | Jump to oldest / newest messages |
+| `/` | Search / filter the chat list |
 | `i` | Compose a message (insert mode) |
 | `Enter` (insert) | Send the message |
-| `Esc` | Cancel composing |
+| `Esc` | Cancel composing / clear filter |
 | `?` | Toggle help |
 | `q` / `Ctrl-C` | Quit |
 

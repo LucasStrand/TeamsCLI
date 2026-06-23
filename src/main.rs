@@ -12,7 +12,10 @@ mod util;
 use std::io::{self, Stdout, Write};
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyEventKind,
+    MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -76,6 +79,13 @@ async fn run_tui(application: &mut App, teams: TeamsClient, cfg: &Config) -> Res
             Event::Input(key) => {
                 let action = application.on_key(key);
                 handle_action(action, application, &teams, &tx);
+            }
+            Event::Scroll(up) => {
+                if up {
+                    application.scroll_up(3);
+                } else {
+                    application.scroll_down(3);
+                }
             }
             Event::Resize => {}
             Event::Tick => {
@@ -156,6 +166,11 @@ fn spawn_input_reader(tx: UnboundedSender<Event>) {
         while let Some(Ok(ev)) = reader.next().await {
             let out = match ev {
                 CtEvent::Key(key) if key.kind != KeyEventKind::Release => Some(Event::Input(key)),
+                CtEvent::Mouse(m) => match m.kind {
+                    MouseEventKind::ScrollUp => Some(Event::Scroll(true)),
+                    MouseEventKind::ScrollDown => Some(Event::Scroll(false)),
+                    _ => None,
+                },
                 CtEvent::Resize(_, _) => Some(Event::Resize),
                 _ => None,
             };
@@ -187,7 +202,7 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 fn setup_terminal() -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -195,7 +210,11 @@ fn setup_terminal() -> Result<Tui> {
 
 fn restore_terminal(terminal: &mut Tui) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }

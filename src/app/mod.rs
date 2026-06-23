@@ -47,6 +47,9 @@ pub struct App {
     seen_message_ids: HashSet<String>,
     /// A chat the main loop should open (load messages for) on its next pass.
     pending_open: Option<String>,
+    /// How many lines the message view is scrolled up from the bottom. 0 = follow
+    /// the newest messages. Clamped to the real maximum by the renderer.
+    pub msg_scroll: u16,
 
     pub mode: Mode,
     pub composer: String,
@@ -69,6 +72,7 @@ impl App {
             messages: Vec::new(),
             seen_message_ids: HashSet::new(),
             pending_open: None,
+            msg_scroll: 0,
             mode: Mode::Normal,
             composer: String::new(),
             status: "Loading chats…".to_string(),
@@ -160,7 +164,13 @@ impl App {
         }
         self.messages.sort_by(|a, b| a.created.cmp(&b.created));
         self.loading = false;
-        if !initial {
+        if initial {
+            self.status = if self.messages.is_empty() {
+                "No messages yet".to_string()
+            } else {
+                format!("{} messages", self.messages.len())
+            };
+        } else {
             self.poll_in_flight = false;
             if added > 0 {
                 self.status = format!("{added} new message(s)");
@@ -174,7 +184,28 @@ impl App {
         self.seen_message_ids.clear();
         self.loading = true;
         self.poll_in_flight = false;
+        self.msg_scroll = 0;
         self.status = "Loading messages…".to_string();
+    }
+
+    /// Scroll the message view up (towards older messages).
+    pub fn scroll_up(&mut self, lines: u16) {
+        self.msg_scroll = self.msg_scroll.saturating_add(lines);
+    }
+
+    /// Scroll the message view down (towards newer messages).
+    pub fn scroll_down(&mut self, lines: u16) {
+        self.msg_scroll = self.msg_scroll.saturating_sub(lines);
+    }
+
+    /// Jump to the oldest messages. The renderer clamps to the real maximum.
+    pub fn scroll_to_top(&mut self) {
+        self.msg_scroll = u16::MAX;
+    }
+
+    /// Jump back to the newest messages (resume following).
+    pub fn scroll_to_bottom(&mut self) {
+        self.msg_scroll = 0;
     }
 
     /// Handle a key press, returning an Action for the main loop to execute.
@@ -222,6 +253,30 @@ impl App {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.move_up();
+                Action::None
+            }
+            KeyCode::PageUp => {
+                self.scroll_up(10);
+                Action::None
+            }
+            KeyCode::PageDown => {
+                self.scroll_down(10);
+                Action::None
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_up(10);
+                Action::None
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_down(10);
+                Action::None
+            }
+            KeyCode::Home => {
+                self.scroll_to_top();
+                Action::None
+            }
+            KeyCode::End => {
+                self.scroll_to_bottom();
                 Action::None
             }
             KeyCode::Char('/') => {

@@ -9,6 +9,8 @@ use crate::teams::models::{ChatSummary, Message};
 pub enum Event {
     /// A key press from the terminal.
     Input(KeyEvent),
+    /// Mouse wheel scrolled up (`true`) or down (`false`) over the message view.
+    Scroll(bool),
     /// The terminal was resized; trigger a redraw.
     Resize,
     /// Periodic timer tick — used to drive polling.
