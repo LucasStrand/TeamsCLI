@@ -140,11 +140,18 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         )));
     }
 
-    // `area.height - 2` accounts for the top/bottom borders.
-    let visible = area.height.saturating_sub(2) as usize;
-    let max_scroll = lines.len().saturating_sub(visible) as u16;
+    // Border-inset content dimensions.
+    let inner_w = area.width.saturating_sub(2);
+    let inner_h = area.height.saturating_sub(2);
 
-    // Clamp the user's scroll offset (lines up from the bottom) to the real
+    // Build the paragraph first so we can ask it for the real wrapped line
+    // count (long messages word-wrap into several physical rows — counting the
+    // logical lines would undercount and hide the newest messages).
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let total = para.line_count(inner_w) as u16;
+    let max_scroll = total.saturating_sub(inner_h);
+
+    // Clamp the user's scroll offset (rows up from the bottom) to the real
     // maximum, writing it back so over-scroll doesn't accumulate.
     if app.msg_scroll > max_scroll {
         app.msg_scroll = max_scroll;
@@ -163,10 +170,7 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         .border_style(border)
         .title(title);
 
-    let para = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .scroll((top, 0));
+    let para = para.block(block).scroll((top, 0));
     f.render_widget(para, area);
 }
 
