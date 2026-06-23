@@ -24,7 +24,8 @@ impl TeamsClient {
         // Learn sender names from history so chats whose profiles don't resolve
         // still get named (the cache is reused when labeling the chat list).
         self.merge_names(resp.name_pairs()).await;
-        Ok(resp.into_messages())
+        let me = self.me_mri().map(|s| s.to_string());
+        Ok(resp.into_messages(me.as_deref()))
     }
 
     /// Send a plain-text message to a conversation.

@@ -3,7 +3,7 @@
 
 mod theme;
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
@@ -181,21 +181,73 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let mut lines: Vec<Line> = Vec::new();
+    // Group consecutive messages from the same sender, insert day separators,
+    // and align/colour the user's own messages to the right.
+    let mut last_day: Option<String> = None;
+    let mut last_key: Option<(bool, String)> = None;
     for msg in &app.messages {
-        let time = msg.created.as_deref().map(format_time).unwrap_or_default();
-        lines.push(Line::from(vec![
-            Span::styled(
-                msg.sender.clone(),
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("  {time}"), Style::default().fg(theme::MUTED)),
-        ]));
-        for text_line in msg.text.lines() {
-            lines.push(Line::from(format!("  {text_line}")));
+        let (day_key, day_label) = msg
+            .created
+            .as_deref()
+            .map(day_key_label)
+            .unwrap_or_default();
+
+        if !day_key.is_empty() && Some(&day_key) != last_day.as_ref() {
+            if last_day.is_some() {
+                lines.push(Line::from(""));
+            }
+            lines.push(
+                Line::from(Span::styled(
+                    format!("── {day_label} ──"),
+                    Style::default().fg(theme::MUTED),
+                ))
+                .alignment(Alignment::Center),
+            );
+            last_day = Some(day_key);
+            last_key = None; // force a sender header after a separator
         }
-        lines.push(Line::from(""));
+
+        let key = (msg.from_me, msg.sender.clone());
+        let new_group = last_key.as_ref() != Some(&key);
+        let accent = if msg.from_me {
+            theme::OWN
+        } else {
+            theme::ACCENT
+        };
+        let align = if msg.from_me {
+            Alignment::Right
+        } else {
+            Alignment::Left
+        };
+
+        if new_group {
+            if last_key.is_some() {
+                lines.push(Line::from(""));
+            }
+            let name = if msg.from_me { "You" } else { &msg.sender };
+            let time = msg.created.as_deref().map(format_time).unwrap_or_default();
+            lines.push(
+                Line::from(vec![
+                    Span::styled(
+                        name.to_string(),
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("  {time}"), Style::default().fg(theme::MUTED)),
+                ])
+                .alignment(align),
+            );
+            last_key = Some(key);
+        }
+
+        let body_style = if msg.from_me {
+            Style::default().fg(theme::OWN)
+        } else {
+            Style::default()
+        };
+        for text_line in msg.text.lines() {
+            lines
+                .push(Line::from(Span::styled(text_line.to_string(), body_style)).alignment(align));
+        }
     }
 
     if lines.is_empty() && app.loading {
@@ -326,6 +378,25 @@ fn format_time(iso: &str) -> String {
         Ok(dt) => dt.with_timezone(&Local).format("%H:%M").to_string(),
         Err(_) => iso.to_string(),
     }
+}
+
+/// For a message timestamp, return a (sort key, human label) for day separators:
+/// key is the local `YYYY-MM-DD`; label is "Today" / "Yesterday" / "Mon 23 Jun".
+fn day_key_label(iso: &str) -> (String, String) {
+    use chrono::{DateTime, Local};
+    let Ok(dt) = iso.parse::<DateTime<chrono::Utc>>() else {
+        return (String::new(), String::new());
+    };
+    let date = dt.with_timezone(&Local).date_naive();
+    let today = Local::now().date_naive();
+    let label = if date == today {
+        "Today".to_string()
+    } else if today.signed_duration_since(date).num_days() == 1 {
+        "Yesterday".to_string()
+    } else {
+        date.format("%a %d %b").to_string()
+    };
+    (date.format("%Y-%m-%d").to_string(), label)
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

@@ -53,6 +53,8 @@ pub struct Message {
     pub text: String,
     /// ISO-8601 timestamp, used for ordering and display.
     pub created: Option<String>,
+    /// True when the signed-in user sent this message.
+    pub from_me: bool,
 }
 
 fn default_true() -> bool {
@@ -380,11 +382,11 @@ pub struct RawMessage {
 
 impl MessagesResponse {
     /// Keep only human chat messages (drop system/thread-activity events) and
-    /// project them into the UI `Message` type.
-    pub fn into_messages(self) -> Vec<Message> {
+    /// project them into the UI `Message` type. `me_mri` marks own messages.
+    pub fn into_messages(self, me_mri: Option<&str>) -> Vec<Message> {
         self.messages
             .into_iter()
-            .filter_map(|m| m.into_message())
+            .filter_map(|m| m.into_message(me_mri))
             .collect()
     }
 
@@ -417,7 +419,7 @@ fn mri_from_contact(from: &str) -> Option<String> {
 }
 
 impl RawMessage {
-    fn into_message(self) -> Option<Message> {
+    fn into_message(self, me_mri: Option<&str>) -> Option<Message> {
         let id = self.id?;
         let mtype = self.message_type.unwrap_or_default();
         // Only render text/rich-text chat messages.
@@ -429,6 +431,12 @@ impl RawMessage {
         if text.is_empty() {
             return None;
         }
+        let from_me = self
+            .from
+            .as_deref()
+            .and_then(mri_from_contact)
+            .map(|mri| Some(mri.as_str()) == me_mri)
+            .unwrap_or(false);
         Some(Message {
             id,
             sender: self
@@ -436,6 +444,7 @@ impl RawMessage {
                 .unwrap_or_else(|| "Unknown".to_string()),
             text,
             created: self.originalarrivaltime.or(self.composetime),
+            from_me,
         })
     }
 }
@@ -454,11 +463,25 @@ mod tests {
             ]
         }"#;
         let resp: MessagesResponse = serde_json::from_str(json).unwrap();
-        let msgs = resp.into_messages();
+        let msgs = resp.into_messages(None);
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].sender, "Ann");
         assert_eq!(msgs[0].text, "hi");
         assert_eq!(msgs[1].text, "yo");
+    }
+
+    #[test]
+    fn marks_own_messages() {
+        let json = r#"{"messages":[
+            {"id":"1","messagetype":"Text","content":"hi","imdisplayname":"Me",
+             "from":"https://x/v1/users/ME/contacts/8:orgid:me"},
+            {"id":"2","messagetype":"Text","content":"yo","imdisplayname":"Ann",
+             "from":"https://x/v1/users/ME/contacts/8:orgid:ann"}
+        ]}"#;
+        let resp: MessagesResponse = serde_json::from_str(json).unwrap();
+        let msgs = resp.into_messages(Some("8:orgid:me"));
+        assert!(msgs[0].from_me);
+        assert!(!msgs[1].from_me);
     }
 
     #[test]

@@ -618,6 +618,7 @@ mod tests {
             sender: "X".into(),
             text: "hi".into(),
             created: Some(created.into()),
+            from_me: false,
         }
     }
 
