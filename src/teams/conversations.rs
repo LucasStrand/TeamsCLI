@@ -31,10 +31,15 @@ impl TeamsClient {
         );
         let resp: ConversationsResponse = serde_json::from_slice(&bytes)?;
 
-        // Resolve member MRIs to display names so 1:1 and group chats are named
-        // after their participants.
+        // Build the name cache so 1:1 and group chats are named after their
+        // participants. Seed from last-message senders (recovers people the
+        // profile lookup misses, e.g. ex-employees) and from the batched
+        // profile lookup, then label from the accumulated cache.
         let me = self.me_mri().map(|s| s.to_string());
-        let names = self.resolve_names(&resp.member_mris(me.as_deref())).await;
+        self.merge_names(resp.last_message_name_pairs()).await;
+        let profiles = self.resolve_names(&resp.member_mris(me.as_deref())).await;
+        self.merge_names(profiles).await;
+        let names = self.names_snapshot().await;
         Ok(resp.into_summaries(me.as_deref(), &names))
     }
 }

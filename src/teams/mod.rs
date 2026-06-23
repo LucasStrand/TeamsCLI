@@ -43,6 +43,9 @@ struct Inner {
     skype: Mutex<Option<SkypeAuth>>,
     /// The signed-in user's MRI, for naming 1:1 chats / detecting self-chats.
     me_mri: Option<String>,
+    /// Accumulating MRI → display-name cache, grown from profile lookups,
+    /// last-message senders, and opened message history.
+    names: Mutex<HashMap<String, String>>,
 }
 
 impl TeamsClient {
@@ -60,6 +63,7 @@ impl TeamsClient {
                 tokens: Mutex::new(map),
                 skype: Mutex::new(None),
                 me_mri,
+                names: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -67,6 +71,21 @@ impl TeamsClient {
     /// The signed-in user's MRI, if it could be derived from the token.
     pub fn me_mri(&self) -> Option<&str> {
         self.inner.me_mri.as_deref()
+    }
+
+    /// Merge newly-learned (MRI → name) pairs into the shared name cache.
+    pub async fn merge_names(&self, pairs: impl IntoIterator<Item = (String, String)>) {
+        let mut cache = self.inner.names.lock().await;
+        for (mri, name) in pairs {
+            if !name.trim().is_empty() {
+                cache.insert(mri, name);
+            }
+        }
+    }
+
+    /// A snapshot of the current name cache for labeling.
+    pub async fn names_snapshot(&self) -> HashMap<String, String> {
+        self.inner.names.lock().await.clone()
     }
 
     /// Valid AAD bearer token for `resource`, redeeming the refresh token if the

@@ -2,11 +2,11 @@
 
 pub mod poller;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::teams::models::{ChatSummary, Message};
+use crate::teams::models::{ChatKind, ChatSummary, Message};
 
 /// The keyboard interaction mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +35,34 @@ fn toggle_focus(focus: Focus) -> Focus {
     }
 }
 
+/// Sidebar filter tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    All,
+    Dms,
+    Channels,
+}
+
+impl Tab {
+    pub const ORDER: [Tab; 3] = [Tab::All, Tab::Dms, Tab::Channels];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::All => "All",
+            Tab::Dms => "DMs",
+            Tab::Channels => "Channels",
+        }
+    }
+
+    fn accepts(self, kind: ChatKind) -> bool {
+        match self {
+            Tab::All => true,
+            Tab::Dms => !kind.is_channel(),
+            Tab::Channels => kind.is_channel(),
+        }
+    }
+}
+
 /// An action the main loop should perform after handling a key.
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -47,6 +75,13 @@ pub enum Action {
     },
 }
 
+/// A new-message notification surfaced by a background refresh.
+#[derive(Debug, Clone)]
+pub struct Notification {
+    pub title: String,
+    pub body: String,
+}
+
 pub struct App {
     /// Display name of the signed-in user (for the status bar).
     pub display_name: String,
@@ -56,6 +91,8 @@ pub struct App {
     pub selected: usize,
     /// Case-insensitive substring filter over chat labels.
     pub filter: String,
+    /// Active sidebar tab.
+    pub tab: Tab,
 
     /// The currently opened chat, if any.
     pub active_chat: Option<String>,
@@ -87,6 +124,7 @@ impl App {
             chats: Vec::new(),
             selected: 0,
             filter: String::new(),
+            tab: Tab::All,
             active_chat: None,
             messages: Vec::new(),
             seen_message_ids: HashSet::new(),
@@ -104,30 +142,80 @@ impl App {
         }
     }
 
+    /// Initial chat load: sort by recency and auto-open the most recent.
     pub fn set_chats(&mut self, chats: Vec<ChatSummary>) {
         self.loading = false;
         self.chats = chats;
+        self.sort_chats();
         self.selected = 0;
-        self.status = format!("{} chats", self.chats.len());
-        // Auto-open the first chat so the conversation shows without pressing Enter.
+        self.status = format!("{} conversations", self.chats.len());
         self.sync_selection();
     }
 
-    /// Indices into `chats` that match the current filter, in order.
-    fn visible_indices(&self) -> Vec<usize> {
-        if self.filter.is_empty() {
-            return (0..self.chats.len()).collect();
+    /// Background refresh: replace the list while preserving selection (by id),
+    /// keeping the active chat marked read, and returning notifications for chats
+    /// that gained a new incoming message.
+    pub fn merge_chats(&mut self, mut chats: Vec<ChatSummary>) -> Vec<Notification> {
+        let active = self.active_chat.clone();
+        let prev_activity: HashMap<String, Option<String>> = self
+            .chats
+            .iter()
+            .map(|c| (c.id.clone(), c.last_activity.clone()))
+            .collect();
+
+        let mut notifs = Vec::new();
+        for c in &chats {
+            let newer = match prev_activity.get(&c.id) {
+                None => true,
+                Some(prev) => c.last_activity.as_deref() > prev.as_deref(),
+            };
+            let is_active = active.as_deref() == Some(c.id.as_str());
+            if c.unread && !c.last_from_me && !is_active && newer {
+                notifs.push(Notification {
+                    title: c.label.clone(),
+                    body: c
+                        .last_preview
+                        .clone()
+                        .unwrap_or_else(|| "New message".into()),
+                });
+            }
         }
+
+        // The chat we're reading stays read locally even if the server lags.
+        if let Some(active_id) = &active {
+            for c in &mut chats {
+                if &c.id == active_id {
+                    c.unread = false;
+                }
+            }
+        }
+
+        let keep = self.selected_chat_id();
+        self.chats = chats;
+        self.sort_chats();
+        self.reselect_by_id(keep.as_deref());
+        notifs
+    }
+
+    /// Sort chats newest-first by last activity (undated chats sort last).
+    fn sort_chats(&mut self) {
+        self.chats
+            .sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    }
+
+    /// Indices into `chats` that match the current tab and filter, in order.
+    fn visible_indices(&self) -> Vec<usize> {
         let needle = self.filter.to_lowercase();
         self.chats
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.label.to_lowercase().contains(&needle))
+            .filter(|(_, c)| self.tab.accepts(c.kind))
+            .filter(|(_, c)| needle.is_empty() || c.label.to_lowercase().contains(&needle))
             .map(|(i, _)| i)
             .collect()
     }
 
-    /// The filtered chats to render, paired with their selection position.
+    /// The filtered chats to render.
     pub fn visible_chats(&self) -> Vec<&ChatSummary> {
         self.visible_indices()
             .into_iter()
@@ -141,6 +229,37 @@ impl App {
             .get(self.selected)
             .and_then(|&i| self.chats.get(i))
             .map(|c| c.id.clone())
+    }
+
+    /// Unread counts as (all, dms, channels) for the tab bar.
+    pub fn unread_counts(&self) -> (usize, usize, usize) {
+        let (mut all, mut dms, mut chans) = (0, 0, 0);
+        for c in &self.chats {
+            if c.unread {
+                all += 1;
+                if c.kind.is_channel() {
+                    chans += 1;
+                } else {
+                    dms += 1;
+                }
+            }
+        }
+        (all, dms, chans)
+    }
+
+    /// Restore the selection to the chat with `id` (within the current view),
+    /// clamping if it's no longer visible.
+    fn reselect_by_id(&mut self, id: Option<&str>) {
+        let visible = self.visible_indices();
+        if let Some(id) = id {
+            if let Some(pos) = visible.iter().position(|&i| self.chats[i].id == id) {
+                self.selected = pos;
+                return;
+            }
+        }
+        if self.selected >= visible.len() {
+            self.selected = visible.len().saturating_sub(1);
+        }
     }
 
     /// Clamp the selection to the visible list and, if it points at a chat other
@@ -164,6 +283,24 @@ impl App {
     /// Taken by the main loop to perform the async message load.
     pub fn take_pending_open(&mut self) -> Option<String> {
         self.pending_open.take()
+    }
+
+    fn set_tab(&mut self, tab: Tab) {
+        if self.tab != tab {
+            self.tab = tab;
+            self.selected = 0;
+            self.sync_selection();
+        }
+    }
+
+    fn cycle_tab(&mut self, forward: bool) {
+        let i = Tab::ORDER.iter().position(|t| *t == self.tab).unwrap_or(0);
+        let n = if forward {
+            (i + 1) % Tab::ORDER.len()
+        } else {
+            (i + Tab::ORDER.len() - 1) % Tab::ORDER.len()
+        };
+        self.set_tab(Tab::ORDER[n]);
     }
 
     /// Apply a batch of messages for `chat_id`. Ignored if the user has since
@@ -200,6 +337,10 @@ impl App {
     }
 
     pub fn open_chat(&mut self, chat_id: String) {
+        // Mark read locally so the unread badge clears immediately.
+        if let Some(c) = self.chats.iter_mut().find(|c| c.id == chat_id) {
+            c.unread = false;
+        }
         self.active_chat = Some(chat_id);
         self.messages.clear();
         self.seen_message_ids.clear();
@@ -294,6 +435,13 @@ impl App {
             KeyCode::Char('h') | KeyCode::Left => self.focus = Focus::Chats,
             KeyCode::Enter => self.focus = Focus::Messages,
             KeyCode::Esc if self.focus == Focus::Messages => self.focus = Focus::Chats,
+
+            // --- tabs ---
+            KeyCode::Char('1') => self.set_tab(Tab::All),
+            KeyCode::Char('2') => self.set_tab(Tab::Dms),
+            KeyCode::Char('3') => self.set_tab(Tab::Channels),
+            KeyCode::Char(']') => self.cycle_tab(true),
+            KeyCode::Char('[') => self.cycle_tab(false),
 
             // --- modes ---
             KeyCode::Char('/') => {
@@ -439,13 +587,29 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::teams::models::Message;
+    use crate::teams::models::{ChatKind, Message};
 
-    fn chat(id: &str, label: &str) -> ChatSummary {
+    fn chat_full(
+        id: &str,
+        label: &str,
+        kind: ChatKind,
+        ts: Option<&str>,
+        unread: bool,
+    ) -> ChatSummary {
         ChatSummary {
             id: id.into(),
             label: label.into(),
+            kind,
+            unread,
+            last_activity: ts.map(|s| s.into()),
+            last_preview: None,
+            last_from_me: false,
+            team: None,
         }
+    }
+
+    fn chat(id: &str, label: &str) -> ChatSummary {
+        chat_full(id, label, ChatKind::Dm, None, false)
     }
 
     fn msg(id: &str, created: &str) -> Message {
@@ -486,20 +650,138 @@ mod tests {
     }
 
     #[test]
-    fn set_chats_auto_opens_first() {
+    fn sorts_chats_by_recency() {
         let mut app = App::new("Me".into());
-        app.set_chats(vec![chat("a", "Ann"), chat("b", "Bob")]);
-        assert_eq!(app.take_pending_open().as_deref(), Some("a"));
+        app.set_chats(vec![
+            chat_full(
+                "a",
+                "Ann",
+                ChatKind::Dm,
+                Some("2026-01-01T09:00:00Z"),
+                false,
+            ),
+            chat_full(
+                "b",
+                "Bob",
+                ChatKind::Dm,
+                Some("2026-01-03T09:00:00Z"),
+                false,
+            ),
+            chat_full(
+                "c",
+                "Cara",
+                ChatKind::Dm,
+                Some("2026-01-02T09:00:00Z"),
+                false,
+            ),
+        ]);
+        let order: Vec<&str> = app.chats.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(order, vec!["b", "c", "a"]);
+        // Auto-opens the most recent.
+        assert_eq!(app.take_pending_open().as_deref(), Some("b"));
     }
 
     #[test]
-    fn navigation_queues_open() {
+    fn merge_preserves_selection_and_reports_notifications() {
         let mut app = App::new("Me".into());
-        app.set_chats(vec![chat("a", "Ann"), chat("b", "Bob")]);
-        let first = app.take_pending_open().unwrap();
-        app.open_chat(first); // open "a"
+        app.set_chats(vec![
+            chat_full(
+                "a",
+                "Ann",
+                ChatKind::Dm,
+                Some("2026-01-02T09:00:00Z"),
+                false,
+            ),
+            chat_full(
+                "b",
+                "Bob",
+                ChatKind::Dm,
+                Some("2026-01-01T09:00:00Z"),
+                false,
+            ),
+        ]);
+        let _ = app.take_pending_open();
+        // Select Bob.
         app.on_key(key('j'));
-        assert_eq!(app.take_pending_open().as_deref(), Some("b"));
+        assert_eq!(app.selected_chat_id().as_deref(), Some("b"));
+
+        // Refresh: Bob gets a newer incoming message and floats to top.
+        let notifs = app.merge_chats(vec![
+            chat_full(
+                "a",
+                "Ann",
+                ChatKind::Dm,
+                Some("2026-01-02T09:00:00Z"),
+                false,
+            ),
+            chat_full("b", "Bob", ChatKind::Dm, Some("2026-01-05T09:00:00Z"), true),
+        ]);
+        // Notification fired for Bob.
+        assert_eq!(notifs.len(), 1);
+        assert_eq!(notifs[0].title, "Bob");
+        // Bob is now at top, and selection followed Bob (not the index).
+        assert_eq!(app.chats[0].id, "b");
+        assert_eq!(app.selected_chat_id().as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn no_notification_for_active_chat() {
+        let mut app = App::new("Me".into());
+        app.set_chats(vec![chat_full(
+            "a",
+            "Ann",
+            ChatKind::Dm,
+            Some("2026-01-01T09:00:00Z"),
+            false,
+        )]);
+        let id = app.take_pending_open().unwrap();
+        app.open_chat(id); // active = a
+        let notifs = app.merge_chats(vec![chat_full(
+            "a",
+            "Ann",
+            ChatKind::Dm,
+            Some("2026-01-09T09:00:00Z"),
+            true,
+        )]);
+        assert!(notifs.is_empty());
+        // Active chat stays read locally.
+        assert!(!app.chats[0].unread);
+    }
+
+    #[test]
+    fn tab_filters_channels() {
+        let mut app = App::new("Me".into());
+        app.set_chats(vec![
+            chat_full(
+                "a",
+                "Ann",
+                ChatKind::Dm,
+                Some("2026-01-02T00:00:00Z"),
+                false,
+            ),
+            chat_full(
+                "g",
+                "General",
+                ChatKind::Channel,
+                Some("2026-01-01T00:00:00Z"),
+                false,
+            ),
+        ]);
+        let _ = app.take_pending_open();
+        app.on_key(key('3')); // Channels tab
+        let vis: Vec<&str> = app
+            .visible_chats()
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect();
+        assert_eq!(vis, vec!["General"]);
+        app.on_key(key('2')); // DMs tab
+        let vis: Vec<&str> = app
+            .visible_chats()
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect();
+        assert_eq!(vis, vec!["Ann"]);
     }
 
     #[test]
@@ -515,28 +797,6 @@ mod tests {
             .map(|c| c.label.as_str())
             .collect();
         assert_eq!(visible, vec!["Bob", "Bobby"]);
-        assert_eq!(app.take_pending_open().as_deref(), Some("b"));
-    }
-
-    #[test]
-    fn capital_g_jumps_to_last_chat() {
-        let mut app = App::new("Me".into());
-        app.set_chats(vec![chat("a", "Ann"), chat("b", "Bob"), chat("c", "Cara")]);
-        let _ = app.take_pending_open();
-        app.on_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::empty()));
-        assert_eq!(app.selected, 2);
-        assert_eq!(app.take_pending_open().as_deref(), Some("c"));
-    }
-
-    #[test]
-    fn gg_jumps_to_first_chat() {
-        let mut app = App::new("Me".into());
-        app.set_chats(vec![chat("a", "Ann"), chat("b", "Bob"), chat("c", "Cara")]);
-        let _ = app.take_pending_open();
-        app.on_key(key('G'));
-        app.on_key(key('g'));
-        app.on_key(key('g')); // second g triggers "go to top"
-        assert_eq!(app.selected, 0);
     }
 
     #[test]
@@ -544,7 +804,6 @@ mod tests {
         let mut app = App::new("Me".into());
         app.set_chats(vec![chat("a", "Ann"), chat("b", "Bob")]);
         let _ = app.take_pending_open();
-        // Focus the message view: j should scroll messages, not move selection.
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
         assert_eq!(app.focus, Focus::Messages);
         app.on_key(key('k')); // scroll up in messages

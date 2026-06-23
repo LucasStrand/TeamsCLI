@@ -6,11 +6,19 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::event::Event;
 use crate::teams::TeamsClient;
 
-/// Load the chat list.
+/// Load the chat list (initial).
 pub fn load_chats(teams: TeamsClient, tx: UnboundedSender<Event>) {
     tokio::spawn(async move {
         let result = teams.list_chats().await.map_err(|e| e.to_string());
         let _ = tx.send(Event::Chats(result));
+    });
+}
+
+/// Refresh the chat list in the background (recency + unread + notifications).
+pub fn refresh_chats(teams: TeamsClient, tx: UnboundedSender<Event>) {
+    tokio::spawn(async move {
+        let result = teams.list_chats().await.map_err(|e| e.to_string());
+        let _ = tx.send(Event::ChatsRefresh(result));
     });
 }
 

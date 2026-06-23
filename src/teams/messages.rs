@@ -21,6 +21,9 @@ impl TeamsClient {
         );
         // Messaging host uses the skypetoken; the bearer resource is unused.
         let resp: MessagesResponse = self.get_json(&url, config::SKYPE_RESOURCE).await?;
+        // Learn sender names from history so chats whose profiles don't resolve
+        // still get named (the cache is reused when labeling the chat list).
+        self.merge_names(resp.name_pairs()).await;
         Ok(resp.into_messages())
     }
 

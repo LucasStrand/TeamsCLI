@@ -71,6 +71,11 @@ async fn run_tui(application: &mut App, teams: TeamsClient, cfg: &Config) -> Res
     // Kick off the initial chat list load.
     app::poller::load_chats(teams.clone(), tx.clone());
 
+    // Refresh the whole chat list every Nth tick to drive recency, unread, and
+    // notifications for chats other than the open one.
+    const REFRESH_EVERY_TICKS: u32 = 3;
+    let mut tick_count: u32 = 0;
+
     loop {
         terminal.draw(|f| ui::draw(f, application))?;
 
@@ -84,11 +89,23 @@ async fn run_tui(application: &mut App, teams: TeamsClient, cfg: &Config) -> Res
             Event::Resize => {}
             Event::Tick => {
                 maybe_poll(application, &teams, &tx);
+                tick_count += 1;
+                if tick_count.is_multiple_of(REFRESH_EVERY_TICKS) {
+                    app::poller::refresh_chats(teams.clone(), tx.clone());
+                }
             }
             Event::Chats(Ok(chats)) => application.set_chats(chats),
             Event::Chats(Err(e)) => {
                 application.loading = false;
                 application.status = format!("Could not load chats: {e}");
+            }
+            Event::ChatsRefresh(Ok(chats)) => {
+                for n in application.merge_chats(chats) {
+                    notify::notify_message(&n.title, &n.body);
+                }
+            }
+            Event::ChatsRefresh(Err(e)) => {
+                tracing::debug!("chat refresh failed: {e}");
             }
             Event::Messages {
                 chat_id,

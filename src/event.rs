@@ -15,8 +15,11 @@ pub enum Event {
     Resize,
     /// Periodic timer tick — used to drive polling.
     Tick,
-    /// Result of loading the chat list.
+    /// Result of the initial chat-list load.
     Chats(Result<Vec<ChatSummary>, String>),
+    /// Result of a periodic background refresh of the chat list (merged in,
+    /// preserving selection; drives unread badges + notifications).
+    ChatsRefresh(Result<Vec<ChatSummary>, String>),
     /// Messages for a chat (initial load or poll result).
     Messages {
         chat_id: String,

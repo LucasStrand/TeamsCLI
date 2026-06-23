@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Focus, Mode};
+use crate::app::{App, Focus, Mode, Tab};
 
 /// Border style for a pane, brighter when it has keyboard focus.
 fn pane_border(focused: bool) -> Style {
@@ -41,11 +41,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_chat_list(f: &mut Frame, app: &App, area: Rect) {
+    // Tab bar on top, list below.
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+
+    draw_tabs(f, app, rows[0]);
+
     let visible = app.visible_chats();
-    let items: Vec<ListItem> = visible
-        .iter()
-        .map(|c| ListItem::new(c.label.clone()))
-        .collect();
+    let items: Vec<ListItem> = visible.iter().map(|c| chat_item(c)).collect();
 
     let mut state = ListState::default();
     if !visible.is_empty() {
@@ -53,12 +58,12 @@ fn draw_chat_list(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let title = if app.mode == Mode::Search || !app.filter.is_empty() {
-        format!(" Chats  /{} ", app.filter)
+        format!(" /{} ", app.filter)
     } else if visible.is_empty() {
-        " Chats ".to_string()
+        " — ".to_string()
     } else {
         // Show position so it's clear the list scrolls past the visible window.
-        format!(" Chats {}/{} ", app.selected + 1, visible.len())
+        format!(" {}/{} ", app.selected + 1, visible.len())
     };
     let list = List::new(items)
         .block(
@@ -74,7 +79,62 @@ fn draw_chat_list(f: &mut Frame, app: &App, area: Rect) {
         )
         .highlight_symbol("› ");
 
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, rows[1], &mut state);
+}
+
+/// Render one chat row: an unread dot, a `#` for channels, then the label.
+fn chat_item(c: &crate::teams::models::ChatSummary) -> ListItem<'static> {
+    let mut spans: Vec<Span> = Vec::new();
+    if c.unread {
+        spans.push(Span::styled(
+            "● ",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        spans.push(Span::raw("  "));
+    }
+    if c.kind.is_channel() {
+        spans.push(Span::styled("# ", Style::default().fg(theme::MUTED)));
+    }
+    let label_style = if c.unread {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    spans.push(Span::styled(c.label.clone(), label_style));
+    ListItem::new(Line::from(spans))
+}
+
+/// The All / DMs / Channels tab strip, with per-tab unread counts.
+fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
+    let (all, dms, chans) = app.unread_counts();
+    let counts = [all, dms, chans];
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, tab) in Tab::ORDER.iter().enumerate() {
+        let active = *tab == app.tab;
+        let unread = counts[i];
+        let mut text = format!(" {} ", tab.label());
+        if unread > 0 {
+            text = format!(" {} {} ", tab.label(), unread);
+        }
+        let style = if active {
+            Style::default()
+                .bg(theme::ACCENT)
+                .fg(theme::BG)
+                .add_modifier(Modifier::BOLD)
+        } else if unread > 0 {
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::MUTED)
+        };
+        spans.push(Span::styled(text, style));
+        spans.push(Span::raw(" "));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
@@ -90,13 +150,18 @@ fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     let title = match &app.active_chat {
         Some(_) => {
-            let name = app
+            let summary = app
                 .chats
                 .iter()
-                .find(|c| Some(&c.id) == app.active_chat.as_ref())
-                .map(|c| c.label.clone())
-                .unwrap_or_else(|| "Chat".to_string());
-            format!(" {name} ")
+                .find(|c| Some(&c.id) == app.active_chat.as_ref());
+            match summary {
+                Some(c) => match &c.team {
+                    // Channels show their parent team for context.
+                    Some(team) => format!(" {team} / {} ", c.label),
+                    None => format!(" {} ", c.label),
+                },
+                None => " Chat ".to_string(),
+            }
         }
         None => " Messages ".to_string(),
     };
@@ -232,6 +297,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from("  Tab / h / l   switch focus (chats ↔ messages)"),
+        Line::from("  1 / 2 / 3     tabs: All / DMs / Channels"),
+        Line::from("  [ / ]         cycle tabs"),
         Line::from("  j / k         down / up"),
         Line::from("  Ctrl-D / U    half-page down / up"),
         Line::from("  gg / G        jump to top / bottom"),
