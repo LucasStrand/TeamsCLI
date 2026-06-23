@@ -1,0 +1,45 @@
+[package]
+name = "teamscli"
+version = "0.1.0"
+edition = "2021"
+description = "A terminal UI client for Microsoft Teams, built on the Microsoft Graph API"
+license = "MIT"
+
+[[bin]]
+name = "teamscli"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# HTTP + JSON
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+urlencoding = "2"
+base64 = "0.22"
+
+# Paths / storage
+directories = "5"
+
+# Notifications
+notify-rust = "4"
+
+# Misc
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+thiserror = "2"
+futures = "0.3"
+
+# Logging (to file — stdout is owned by the TUI)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[dev-dependencies]
+wiremock = "0.6"

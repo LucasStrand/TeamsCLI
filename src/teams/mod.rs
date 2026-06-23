@@ -1,0 +1,184 @@
+//! Client for Microsoft Teams' internal (undocumented) API.
+//!
+//! Auth model: an AAD access token for the Skype/Spaces resource is exchanged
+//! for a *skypetoken* (see [`authz`]). Requests to the chat-service aggregator
+//! (CSA) carry the bearer token plus the skypetoken; requests to the
+//! region-specific messaging host carry the skypetoken as the Authorization
+//! header. Header routing is decided per-host in [`TeamsClient::send`].
+
+mod authz;
+pub mod conversations;
+pub mod messages;
+pub mod models;
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{anyhow, Result};
+use serde::de::DeserializeOwned;
+use tokio::sync::Mutex;
+
+use crate::auth::device_code;
+use crate::auth::token_store::TokenSet;
+use crate::config::{self, Config};
+
+use authz::SkypeAuth;
+
+const MAX_RETRIES: u32 = 4;
+
+#[derive(Clone)]
+pub struct TeamsClient {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    http: reqwest::Client,
+    cfg: Config,
+    /// The multi-resource refresh token (redeemed per-resource on demand).
+    refresh_token: Mutex<String>,
+    /// Cached access tokens keyed by resource/audience.
+    tokens: Mutex<HashMap<String, TokenSet>>,
+    skype: Mutex<Option<SkypeAuth>>,
+}
+
+impl TeamsClient {
+    pub fn new(http: reqwest::Client, cfg: Config, tokens: TokenSet) -> Self {
+        let refresh = tokens.refresh_token.clone().unwrap_or_default();
+        let mut map = HashMap::new();
+        // The initial token was issued for the Skype/Spaces resource.
+        map.insert(config::SKYPE_RESOURCE.to_string(), tokens);
+        Self {
+            inner: Arc::new(Inner {
+                http,
+                cfg,
+                refresh_token: Mutex::new(refresh),
+                tokens: Mutex::new(map),
+                skype: Mutex::new(None),
+            }),
+        }
+    }
+
+    /// Valid AAD bearer token for `resource`, redeeming the refresh token if the
+    /// cached token is missing or expired.
+    async fn bearer(&self, resource: &str) -> Result<String> {
+        {
+            let map = self.inner.tokens.lock().await;
+            if let Some(ts) = map.get(resource) {
+                if !ts.is_access_expired() {
+                    return Ok(ts.access_token.clone());
+                }
+            }
+        }
+        let refresh = self.inner.refresh_token.lock().await.clone();
+        if refresh.is_empty() {
+            return Err(anyhow!("no refresh token available; please sign in again"));
+        }
+        let ts =
+            device_code::refresh(&self.inner.cfg, &self.inner.http, &refresh, resource).await?;
+        // A rotated refresh token must be kept and persisted for silent re-login.
+        if let Some(new_refresh) = &ts.refresh_token {
+            *self.inner.refresh_token.lock().await = new_refresh.clone();
+            let _ = ts.save(&self.inner.cfg.token_cache_path);
+        }
+        let token = ts.access_token.clone();
+        self.inner
+            .tokens
+            .lock()
+            .await
+            .insert(resource.to_string(), ts);
+        Ok(token)
+    }
+
+    /// Valid skypetoken + messaging host, fetching/refreshing as needed. The
+    /// authz exchange requires a token for the Skype/Spaces resource.
+    async fn skype_auth(&self) -> Result<SkypeAuth> {
+        {
+            let guard = self.inner.skype.lock().await;
+            if let Some(sa) = guard.as_ref() {
+                if !sa.is_expired() {
+                    return Ok(sa.clone());
+                }
+            }
+        }
+        let bearer = self.bearer(config::SKYPE_RESOURCE).await?;
+        let sa = authz::fetch_skype_auth(&self.inner.http, &bearer).await?;
+        *self.inner.skype.lock().await = Some(sa.clone());
+        Ok(sa)
+    }
+
+    /// Issue a request with host-appropriate auth headers and retry on
+    /// throttling / transient errors.
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        body: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
+        let mut attempt = 0;
+        loop {
+            let sa = self.skype_auth().await?;
+            let to_messaging = url.starts_with(&sa.messaging_host);
+            let skype_header = format!("skypetoken={}", sa.skype_token);
+
+            let mut req = self.inner.http.request(method.clone(), url);
+            if to_messaging {
+                // Messaging host authenticates with the skypetoken only.
+                req = req
+                    .header(reqwest::header::AUTHORIZATION, &skype_header)
+                    .header("Authentication", &skype_header);
+            } else {
+                // CSA host needs a bearer for the chatsvcagg resource plus the
+                // skypetoken side-channel.
+                let bearer = self.bearer(config::CHATSVCAGG_RESOURCE).await?;
+                req = req
+                    .bearer_auth(&bearer)
+                    .header("Authentication", &skype_header);
+            }
+            if let Some(ref b) = body {
+                req = req
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(b.clone());
+            }
+
+            let resp = req.send().await?;
+            let status = resp.status();
+            if status.is_success() {
+                return Ok(resp.bytes().await?.to_vec());
+            }
+
+            let retryable =
+                status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+            if retryable && attempt < MAX_RETRIES {
+                let wait = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(Duration::from_secs)
+                    .unwrap_or_else(|| Duration::from_secs(1u64 << attempt));
+                tracing::warn!("teams {status} on {url}, retrying in {wait:?}");
+                tokio::time::sleep(wait).await;
+                attempt += 1;
+                continue;
+            }
+
+            let detail = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Teams request failed ({status}): {detail}"));
+        }
+    }
+
+    async fn get_json<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
+        let bytes = self.send(reqwest::Method::GET, url, None).await?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    async fn post_bytes(&self, url: &str, body: Vec<u8>) -> Result<Vec<u8>> {
+        self.send(reqwest::Method::POST, url, Some(body)).await
+    }
+
+    /// The region-specific messaging host (for building message URLs).
+    async fn messaging_host(&self) -> Result<String> {
+        Ok(self.skype_auth().await?.messaging_host)
+    }
+}
