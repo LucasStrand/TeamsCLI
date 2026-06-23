@@ -13,6 +13,16 @@ pub fn jwt_claims(token: &str) -> Option<serde_json::Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// The signed-in user's Teams MRI (`8:orgid:<object-id>`), derived from the
+/// `oid` claim of their access token. Used to identify "me" in chat rosters.
+pub fn my_mri_from_token(token: &str) -> Option<String> {
+    let oid = jwt_claims(token)?
+        .get("oid")?
+        .as_str()
+        .map(|s| s.to_string())?;
+    Some(format!("8:orgid:{oid}"))
+}
+
 /// Best-effort display name for the signed-in user from their access token.
 pub fn display_name_from_token(token: &str) -> String {
     let claims = jwt_claims(token);

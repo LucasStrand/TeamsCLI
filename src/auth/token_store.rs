@@ -1,8 +1,9 @@
-//! Persistent storage for OAuth tokens.
+//! OAuth tokens.
 //!
-//! The refresh token is the sensitive long-lived secret; it is written to a
-//! user-only (0600) file under the config directory. (A future enhancement can
-//! move this into the OS keychain via the `keyring` crate.)
+//! Only the **refresh token** is persisted to disk (user-only `0600` file). It
+//! is multi-resource, so every per-resource access token is derived from it at
+//! runtime. Access tokens are never written to disk — persisting them caused
+//! audience confusion (a `chatsvcagg` token being reused as the Skype token).
 
 use std::fs;
 use std::path::Path;
@@ -11,13 +12,19 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// In-memory access token for a single resource, plus the refresh token.
+#[derive(Debug, Clone)]
 pub struct TokenSet {
     pub access_token: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
     /// Absolute time at which the access token expires.
     pub expires_at: DateTime<Utc>,
+}
+
+/// On-disk shape: just the refresh token.
+#[derive(Debug, Serialize, Deserialize)]
+struct RefreshStore {
+    refresh_token: String,
 }
 
 impl TokenSet {
@@ -41,27 +48,39 @@ impl TokenSet {
         Utc::now() >= self.expires_at
     }
 
-    pub fn load(path: &Path) -> Option<Self> {
-        let data = fs::read_to_string(path).ok()?;
-        match serde_json::from_str(&data) {
-            Ok(tokens) => Some(tokens),
-            Err(e) => {
-                tracing::warn!("ignoring unreadable token cache at {path:?}: {e}");
-                None
-            }
+    /// Persist this token set's refresh token (if any) for silent re-login.
+    pub fn save_refresh(&self, path: &Path) -> Result<()> {
+        if let Some(rt) = &self.refresh_token {
+            save_refresh(path, rt)?;
         }
-    }
-
-    pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating config dir {parent:?}"))?;
-        }
-        let json = serde_json::to_string_pretty(self)?;
-        fs::write(path, json).with_context(|| format!("writing token cache {path:?}"))?;
-        restrict_permissions(path);
         Ok(())
     }
+}
+
+/// Read the cached refresh token, if present and readable.
+pub fn load_refresh(path: &Path) -> Option<String> {
+    let data = fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<RefreshStore>(&data) {
+        Ok(store) if !store.refresh_token.is_empty() => Some(store.refresh_token),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!("ignoring unreadable token cache at {path:?}: {e}");
+            None
+        }
+    }
+}
+
+/// Write the refresh token to a user-only file.
+pub fn save_refresh(path: &Path, refresh_token: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating config dir {parent:?}"))?;
+    }
+    let json = serde_json::to_string_pretty(&RefreshStore {
+        refresh_token: refresh_token.to_string(),
+    })?;
+    fs::write(path, json).with_context(|| format!("writing token cache {path:?}"))?;
+    restrict_permissions(path);
+    Ok(())
 }
 
 #[cfg(unix)]

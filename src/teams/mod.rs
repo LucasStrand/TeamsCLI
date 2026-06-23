@@ -40,11 +40,14 @@ struct Inner {
     /// Cached access tokens keyed by resource/audience.
     tokens: Mutex<HashMap<String, TokenSet>>,
     skype: Mutex<Option<SkypeAuth>>,
+    /// The signed-in user's MRI, for naming 1:1 chats / detecting self-chats.
+    me_mri: Option<String>,
 }
 
 impl TeamsClient {
     pub fn new(http: reqwest::Client, cfg: Config, tokens: TokenSet) -> Self {
         let refresh = tokens.refresh_token.clone().unwrap_or_default();
+        let me_mri = crate::util::my_mri_from_token(&tokens.access_token);
         let mut map = HashMap::new();
         // The initial token was issued for the Skype/Spaces resource.
         map.insert(config::SKYPE_RESOURCE.to_string(), tokens);
@@ -55,8 +58,14 @@ impl TeamsClient {
                 refresh_token: Mutex::new(refresh),
                 tokens: Mutex::new(map),
                 skype: Mutex::new(None),
+                me_mri,
             }),
         }
+    }
+
+    /// The signed-in user's MRI, if it could be derived from the token.
+    pub fn me_mri(&self) -> Option<&str> {
+        self.inner.me_mri.as_deref()
     }
 
     /// Valid AAD bearer token for `resource`, redeeming the refresh token if the
@@ -77,9 +86,10 @@ impl TeamsClient {
         let ts =
             device_code::refresh(&self.inner.cfg, &self.inner.http, &refresh, resource).await?;
         // A rotated refresh token must be kept and persisted for silent re-login.
+        // Only the refresh token is persisted — never per-resource access tokens.
         if let Some(new_refresh) = &ts.refresh_token {
             *self.inner.refresh_token.lock().await = new_refresh.clone();
-            let _ = ts.save(&self.inner.cfg.token_cache_path);
+            let _ = ts.save_refresh(&self.inner.cfg.token_cache_path);
         }
         let token = ts.access_token.clone();
         self.inner

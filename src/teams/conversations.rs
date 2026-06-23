@@ -23,6 +23,6 @@ impl TeamsClient {
             String::from_utf8_lossy(&bytes)
         );
         let resp: ConversationsResponse = serde_json::from_slice(&bytes)?;
-        Ok(resp.into_summaries())
+        Ok(resp.into_summaries(self.me_mri()))
     }
 }
