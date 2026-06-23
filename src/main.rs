@@ -80,13 +80,7 @@ async fn run_tui(application: &mut App, teams: TeamsClient, cfg: &Config) -> Res
                 let action = application.on_key(key);
                 handle_action(action, application, &teams, &tx);
             }
-            Event::Scroll(up) => {
-                if up {
-                    application.scroll_up(3);
-                } else {
-                    application.scroll_down(3);
-                }
-            }
+            Event::Scroll(up) => application.wheel(up),
             Event::Resize => {}
             Event::Tick => {
                 maybe_poll(application, &teams, &tx);

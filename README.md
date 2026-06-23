@@ -73,17 +73,20 @@ cached, so subsequent launches sign you in silently.
 
 ## Keybindings
 
+Navigation is vim-style and acts on the **focused pane** (chat list ↔ messages).
+
 | Key | Action |
 |-----|--------|
-| `j` / `↓` | Move down the chat list (opens the chat automatically) |
-| `k` / `↑` | Move up the chat list |
-| `PgUp` / `PgDn` | Scroll messages (also mouse wheel) |
-| `Ctrl-U` / `Ctrl-D` | Scroll messages up / down |
-| `Home` / `End` | Jump to oldest / newest messages |
+| `Tab` / `h` / `l` | Switch focus between chat list and messages |
+| `j` / `k` | Down / up in the focused pane (selecting a chat opens it) |
+| `Ctrl-D` / `Ctrl-U` | Half-page down / up |
+| `gg` / `G` | Jump to top / bottom |
+| mouse wheel | Scroll the focused pane |
+| `Enter` | Open the chat and focus the message view |
 | `/` | Search / filter the chat list |
-| `i` | Compose a message (insert mode) |
-| `Enter` (insert) | Send the message |
-| `Esc` | Cancel composing / clear filter |
+| `i` | Compose a message |
+| `Enter` (compose) | Send the message |
+| `Esc` | Leave compose / clear filter / back to chat list |
 | `?` | Toggle help |
 | `q` / `Ctrl-C` | Quit |
 

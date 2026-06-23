@@ -9,7 +9,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Mode};
+use crate::app::{App, Focus, Mode};
+
+/// Border style for a pane, brighter when it has keyboard focus.
+fn pane_border(focused: bool) -> Style {
+    if focused {
+        Style::default().fg(theme::ACCENT)
+    } else {
+        Style::default().fg(theme::MUTED)
+    }
+}
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let root = Layout::default()
@@ -44,12 +53,20 @@ fn draw_chat_list(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let title = if app.mode == Mode::Search || !app.filter.is_empty() {
-        format!(" Chats  /{}", app.filter)
+        format!(" Chats  /{} ", app.filter)
+    } else if visible.is_empty() {
+        " Chats ".to_string()
     } else {
-        format!(" Chats ({}) ", visible.len())
+        // Show position so it's clear the list scrolls past the visible window.
+        format!(" Chats {}/{} ", app.selected + 1, visible.len())
     };
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(pane_border(app.focus == Focus::Chats))
+                .title(title),
+        )
         .highlight_style(
             Style::default()
                 .fg(theme::ACCENT)
@@ -84,9 +101,14 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         None => " Messages ".to_string(),
     };
 
+    let border = pane_border(app.focus == Focus::Messages);
+
     if app.active_chat.is_none() {
-        let block = Block::default().borders(Borders::ALL).title(title);
-        let hint = Paragraph::new("Select a chat and press Enter to open it.")
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border)
+            .title(title);
+        let hint = Paragraph::new("Select a chat (j/k), then Tab or l to read it.")
             .block(block)
             .style(Style::default().fg(theme::MUTED));
         f.render_widget(hint, area);
@@ -136,7 +158,10 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         title
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border)
+        .title(title);
 
     let para = Paragraph::new(lines)
         .block(block)
@@ -197,16 +222,22 @@ fn draw_help(f: &mut Frame, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("  j / ↓        move down (opens chat automatically)"),
-        Line::from("  k / ↑        move up"),
-        Line::from("  PgUp / PgDn  scroll messages (or mouse wheel)"),
-        Line::from("  Ctrl-U/D     scroll messages up / down"),
-        Line::from("  Home / End   jump to oldest / newest"),
-        Line::from("  /            search / filter chats"),
-        Line::from("  i            compose a message"),
-        Line::from("  Esc          cancel compose / clear filter"),
-        Line::from("  ?            toggle this help"),
-        Line::from("  q / Ctrl-C   quit"),
+        Line::from(Span::styled(
+            "  acts on the focused pane (chats ↔ messages)",
+            Style::default().fg(theme::MUTED),
+        )),
+        Line::from(""),
+        Line::from("  Tab / h / l   switch focus (chats ↔ messages)"),
+        Line::from("  j / k         down / up"),
+        Line::from("  Ctrl-D / U    half-page down / up"),
+        Line::from("  gg / G        jump to top / bottom"),
+        Line::from("  mouse wheel   scroll the focused pane"),
+        Line::from("  Enter         open & focus the message view"),
+        Line::from("  /             search / filter chats"),
+        Line::from("  i             compose a message"),
+        Line::from("  Esc           leave compose / filter / messages"),
+        Line::from("  ?             toggle this help"),
+        Line::from("  q / Ctrl-C    quit"),
         Line::from(""),
         Line::from(Span::styled(
             "  press any key to close",

@@ -8,15 +8,31 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::teams::models::{ChatSummary, Message};
 
-/// Which pane currently has focus / what the keyboard does.
+/// The keyboard interaction mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Navigate the chat list and read messages.
+    /// Vim-style navigation across the focused pane.
     Normal,
     /// Typing a message into the composer.
     Insert,
     /// Typing a filter to narrow the chat list.
     Search,
+}
+
+/// Which pane the keyboard acts on in Normal mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// The chat list (sidebar).
+    Chats,
+    /// The message view.
+    Messages,
+}
+
+fn toggle_focus(focus: Focus) -> Focus {
+    match focus {
+        Focus::Chats => Focus::Messages,
+        Focus::Messages => Focus::Chats,
+    }
 }
 
 /// An action the main loop should perform after handling a key.
@@ -52,6 +68,9 @@ pub struct App {
     pub msg_scroll: u16,
 
     pub mode: Mode,
+    pub focus: Focus,
+    /// True after a lone `g`, awaiting a second `g` for "go to top".
+    pending_g: bool,
     pub composer: String,
     pub status: String,
     pub show_help: bool,
@@ -74,6 +93,8 @@ impl App {
             pending_open: None,
             msg_scroll: 0,
             mode: Mode::Normal,
+            focus: Focus::Chats,
+            pending_g: false,
             composer: String::new(),
             status: "Loading chats…".to_string(),
             show_help: false,
@@ -208,6 +229,12 @@ impl App {
         self.msg_scroll = 0;
     }
 
+    /// Mouse-wheel scroll, applied to whichever pane has focus.
+    pub fn wheel(&mut self, up: bool) {
+        // Wheel up = move backwards (older messages / earlier chats).
+        self.pane_step(3, !up);
+    }
+
     /// Handle a key press, returning an Action for the main loop to execute.
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
         // Global: Ctrl-C always quits.
@@ -225,73 +252,121 @@ impl App {
         }
     }
 
-    fn move_down(&mut self) {
+    /// Move the chat-list selection down by `n` (clamped), opening as it goes.
+    fn select_down(&mut self, n: usize) {
         let count = self.visible_indices().len();
-        if self.selected + 1 < count {
-            self.selected += 1;
-            self.sync_selection();
+        if count == 0 {
+            return;
         }
+        self.selected = (self.selected + n).min(count - 1);
+        self.sync_selection();
     }
 
-    fn move_up(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
-            self.sync_selection();
+    fn select_up(&mut self, n: usize) {
+        self.selected = self.selected.saturating_sub(n);
+        self.sync_selection();
+    }
+
+    fn select_to(&mut self, idx: usize) {
+        let count = self.visible_indices().len();
+        if count == 0 {
+            return;
         }
+        self.selected = idx.min(count - 1);
+        self.sync_selection();
     }
 
     fn on_key_normal(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // `gg` = go to top: consume the pending `g` if this is the second one.
+        let after_g = self.pending_g;
+        self.pending_g = false;
+
         match key.code {
-            KeyCode::Char('q') => Action::Quit,
+            KeyCode::Char('q') => return Action::Quit,
             KeyCode::Char('?') => {
                 self.show_help = true;
-                Action::None
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.move_down();
-                Action::None
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.move_up();
-                Action::None
-            }
-            KeyCode::PageUp => {
-                self.scroll_up(10);
-                Action::None
-            }
-            KeyCode::PageDown => {
-                self.scroll_down(10);
-                Action::None
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_up(10);
-                Action::None
-            }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_down(10);
-                Action::None
-            }
-            KeyCode::Home => {
-                self.scroll_to_top();
-                Action::None
-            }
-            KeyCode::End => {
-                self.scroll_to_bottom();
-                Action::None
-            }
+            // --- focus switching ---
+            KeyCode::Tab => self.focus = toggle_focus(self.focus),
+            KeyCode::Char('l') | KeyCode::Right => self.focus = Focus::Messages,
+            KeyCode::Char('h') | KeyCode::Left => self.focus = Focus::Chats,
+            KeyCode::Enter => self.focus = Focus::Messages,
+            KeyCode::Esc if self.focus == Focus::Messages => self.focus = Focus::Chats,
+
+            // --- modes ---
             KeyCode::Char('/') => {
                 self.mode = Mode::Search;
+                self.focus = Focus::Chats;
                 self.status = "Filter chats — type to narrow, Esc to clear".to_string();
-                Action::None
             }
             KeyCode::Char('i') => {
                 if self.active_chat.is_some() {
                     self.mode = Mode::Insert;
                     self.status = "-- INSERT -- (Enter to send, Esc to cancel)".to_string();
                 }
-                Action::None
             }
-            _ => Action::None,
+
+            // --- `g` then `g` = top ---
+            KeyCode::Char('g') => {
+                if after_g {
+                    self.goto_top();
+                } else {
+                    self.pending_g = true;
+                }
+            }
+            KeyCode::Char('G') => self.goto_bottom(),
+
+            // --- vim motion, dispatched to the focused pane ---
+            KeyCode::Char('j') | KeyCode::Down => self.pane_step(1, true),
+            KeyCode::Char('k') | KeyCode::Up => self.pane_step(1, false),
+            KeyCode::Char('d') if ctrl => self.pane_step(10, true),
+            KeyCode::Char('u') if ctrl => self.pane_step(10, false),
+            KeyCode::PageDown => self.pane_step(10, true),
+            KeyCode::PageUp => self.pane_step(10, false),
+            KeyCode::Home => self.goto_top(),
+            KeyCode::End => self.goto_bottom(),
+
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// A down (`forward`) or up motion of `n` units applied to the focused pane:
+    /// the chat selection when on the sidebar, the message scroll when on the
+    /// message view.
+    fn pane_step(&mut self, n: u16, forward: bool) {
+        match self.focus {
+            Focus::Chats => {
+                if forward {
+                    self.select_down(n as usize);
+                } else {
+                    self.select_up(n as usize);
+                }
+            }
+            Focus::Messages => {
+                // In the message view, down = towards newer = less scroll-back.
+                if forward {
+                    self.scroll_down(n);
+                } else {
+                    self.scroll_up(n);
+                }
+            }
+        }
+    }
+
+    fn goto_top(&mut self) {
+        match self.focus {
+            Focus::Chats => self.select_to(0),
+            Focus::Messages => self.scroll_to_top(),
+        }
+    }
+
+    fn goto_bottom(&mut self) {
+        match self.focus {
+            Focus::Chats => self.select_to(usize::MAX),
+            Focus::Messages => self.scroll_to_bottom(),
         }
     }
 
@@ -308,8 +383,8 @@ impl App {
                 // Keep the filter, return to navigation.
                 self.mode = Mode::Normal;
             }
-            KeyCode::Down => self.move_down(),
-            KeyCode::Up => self.move_up(),
+            KeyCode::Down => self.select_down(1),
+            KeyCode::Up => self.select_up(1),
             KeyCode::Backspace => {
                 self.filter.pop();
                 self.selected = 0;
@@ -441,5 +516,39 @@ mod tests {
             .collect();
         assert_eq!(visible, vec!["Bob", "Bobby"]);
         assert_eq!(app.take_pending_open().as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn capital_g_jumps_to_last_chat() {
+        let mut app = App::new("Me".into());
+        app.set_chats(vec![chat("a", "Ann"), chat("b", "Bob"), chat("c", "Cara")]);
+        let _ = app.take_pending_open();
+        app.on_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::empty()));
+        assert_eq!(app.selected, 2);
+        assert_eq!(app.take_pending_open().as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn gg_jumps_to_first_chat() {
+        let mut app = App::new("Me".into());
+        app.set_chats(vec![chat("a", "Ann"), chat("b", "Bob"), chat("c", "Cara")]);
+        let _ = app.take_pending_open();
+        app.on_key(key('G'));
+        app.on_key(key('g'));
+        app.on_key(key('g')); // second g triggers "go to top"
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn focus_switches_motion_target() {
+        let mut app = App::new("Me".into());
+        app.set_chats(vec![chat("a", "Ann"), chat("b", "Bob")]);
+        let _ = app.take_pending_open();
+        // Focus the message view: j should scroll messages, not move selection.
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.focus, Focus::Messages);
+        app.on_key(key('k')); // scroll up in messages
+        assert_eq!(app.selected, 0); // selection unchanged
+        assert!(app.msg_scroll > 0);
     }
 }
