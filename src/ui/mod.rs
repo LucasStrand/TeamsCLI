@@ -35,6 +35,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_right(f, app, columns[1]);
     draw_status(f, app, root[1]);
 
+    if app.mode == Mode::NewChat {
+        draw_new_chat(f, app, f.area());
+    }
     if app.show_help {
         draw_help(f, f.area());
     }
@@ -315,6 +318,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         Mode::Normal => " NORMAL ",
         Mode::Insert => " INSERT ",
         Mode::Search => " SEARCH ",
+        Mode::NewChat => " NEW CHAT ",
     };
     let who = app.display_name.clone();
 
@@ -357,6 +361,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::from("  mouse wheel   scroll the focused pane"),
         Line::from("  Enter         open & focus the message view"),
         Line::from("  /             search / filter chats"),
+        Line::from("  n             new chat (search people / email)"),
         Line::from("  i             compose a message"),
         Line::from("  Esc           leave compose / filter / messages"),
         Line::from("  ?             toggle this help"),
@@ -369,6 +374,73 @@ fn draw_help(f: &mut Frame, area: Rect) {
     ];
     let block = Block::default().borders(Borders::ALL).title(" Help ");
     f.render_widget(Paragraph::new(text).block(block), popup);
+}
+
+fn draw_new_chat(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(60, 70, area);
+    f.render_widget(Clear, popup);
+
+    let results = app.nc_results();
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Query line.
+    lines.push(Line::from(vec![
+        Span::styled("To: ", Style::default().fg(theme::MUTED)),
+        Span::raw(format!("{}_", app.nc_query)),
+    ]));
+    // Chosen chips.
+    if !app.nc_chosen.is_empty() {
+        let names: Vec<String> = app.nc_chosen.iter().map(|p| p.name.clone()).collect();
+        lines.push(Line::from(vec![
+            Span::styled("Added: ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                names.join(", "),
+                Style::default().fg(theme::OWN).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+    lines.push(Line::from(""));
+
+    if results.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no matches — type an email then Ctrl-R to look up",
+            Style::default().fg(theme::MUTED),
+        )));
+    } else {
+        // Window the results around the cursor to fit the popup.
+        let max_rows = popup.height.saturating_sub(7) as usize;
+        let start = app.nc_idx.saturating_sub(max_rows.saturating_sub(1));
+        for (i, p) in results.iter().enumerate().skip(start).take(max_rows) {
+            let selected = i == app.nc_idx;
+            let chosen = app.nc_is_chosen(&p.mri);
+            let marker = if chosen { "✓ " } else { "  " };
+            let style = if selected {
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else if chosen {
+                Style::default().fg(theme::OWN)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{}{}{}", if selected { "› " } else { "  " }, marker, p.name),
+                style,
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Tab add · Enter start · Ctrl-R email lookup · Esc cancel",
+        Style::default().fg(theme::MUTED),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::ACCENT))
+        .title(" New chat ");
+    f.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 fn format_time(iso: &str) -> String {

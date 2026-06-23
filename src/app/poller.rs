@@ -56,3 +56,41 @@ pub fn send_message(teams: TeamsClient, tx: UnboundedSender<Event>, chat_id: Str
         let _ = tx.send(Event::Sent(result));
     });
 }
+
+/// Snapshot known contacts (name cache) for the new-chat picker.
+pub fn load_people(teams: TeamsClient, tx: UnboundedSender<Event>) {
+    tokio::spawn(async move {
+        let mut people: Vec<crate::teams::people::Person> = teams
+            .names_snapshot()
+            .await
+            .into_iter()
+            .map(|(mri, name)| crate::teams::people::Person { mri, name })
+            .collect();
+        people.sort_by_key(|p| p.name.to_lowercase());
+        let _ = tx.send(Event::People(people));
+    });
+}
+
+/// Resolve an email address to a person.
+pub fn resolve_person(teams: TeamsClient, tx: UnboundedSender<Event>, email: String) {
+    tokio::spawn(async move {
+        let result = teams.resolve_email(&email).await.map_err(|e| e.to_string());
+        let _ = tx.send(Event::PersonResolved(result));
+    });
+}
+
+/// Create a 1:1 or group chat, then report the new conversation id.
+pub fn create_chat(
+    teams: TeamsClient,
+    tx: UnboundedSender<Event>,
+    members: Vec<String>,
+    topic: Option<String>,
+) {
+    tokio::spawn(async move {
+        let result = teams
+            .create_chat(&members, topic.as_deref())
+            .await
+            .map_err(|e| e.to_string());
+        let _ = tx.send(Event::ChatCreated(result));
+    });
+}

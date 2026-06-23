@@ -4,6 +4,7 @@
 use crossterm::event::KeyEvent;
 
 use crate::teams::models::{ChatSummary, Message};
+use crate::teams::people::Person;
 
 #[derive(Debug)]
 pub enum Event {
@@ -29,4 +30,10 @@ pub enum Event {
     },
     /// Result of sending a message.
     Sent(Result<(), String>),
+    /// Known contacts (from the name cache) for the new-chat picker.
+    People(Vec<Person>),
+    /// Result of resolving an email to a person for the new-chat picker.
+    PersonResolved(Result<Option<Person>, String>),
+    /// Result of creating a new chat — the new conversation id.
+    ChatCreated(Result<String, String>),
 }

@@ -127,6 +127,21 @@ async fn run_tui(application: &mut App, teams: TeamsClient, cfg: &Config) -> Res
             Event::Sent(Err(e)) => {
                 application.status = format!("Send failed: {e}");
             }
+            Event::People(people) => application.set_people(people),
+            Event::PersonResolved(Ok(person)) => application.add_resolved_person(person),
+            Event::PersonResolved(Err(e)) => {
+                application.status = format!("Lookup failed: {e}");
+            }
+            Event::ChatCreated(Ok(chat_id)) => {
+                application.finish_new_chat();
+                application.open_chat(chat_id.clone());
+                app::poller::open_chat(teams.clone(), tx.clone(), chat_id);
+                // Refresh the list so the new conversation appears in it.
+                app::poller::refresh_chats(teams.clone(), tx.clone());
+            }
+            Event::ChatCreated(Err(e)) => {
+                application.status = format!("Could not create chat: {e}");
+            }
         }
 
         // Auto-open whatever chat the selection now points at (no Enter needed).
@@ -155,6 +170,13 @@ fn handle_action(
         Action::Quit => application.should_quit = true,
         Action::SendMessage { chat_id, text } => {
             app::poller::send_message(teams.clone(), tx.clone(), chat_id, text);
+        }
+        Action::LoadPeople => app::poller::load_people(teams.clone(), tx.clone()),
+        Action::ResolvePerson(email) => {
+            app::poller::resolve_person(teams.clone(), tx.clone(), email);
+        }
+        Action::CreateChat { members, topic } => {
+            app::poller::create_chat(teams.clone(), tx.clone(), members, topic);
         }
     }
 }

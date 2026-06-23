@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::teams::models::{ChatKind, ChatSummary, Message};
+use crate::teams::people::Person;
 
 /// The keyboard interaction mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +18,8 @@ pub enum Mode {
     Insert,
     /// Typing a filter to narrow the chat list.
     Search,
+    /// Picking people to start a new chat.
+    NewChat,
 }
 
 /// Which pane the keyboard acts on in Normal mode.
@@ -73,6 +76,15 @@ pub enum Action {
         chat_id: String,
         text: String,
     },
+    /// Load known contacts for the new-chat picker.
+    LoadPeople,
+    /// Resolve an email to a person in the new-chat picker.
+    ResolvePerson(String),
+    /// Create a new 1:1/group chat with these members (+ optional group topic).
+    CreateChat {
+        members: Vec<String>,
+        topic: Option<String>,
+    },
 }
 
 /// A new-message notification surfaced by a background refresh.
@@ -109,6 +121,17 @@ pub struct App {
     /// True after a lone `g`, awaiting a second `g` for "go to top".
     pending_g: bool,
     pub composer: String,
+
+    // --- new-chat picker state ---
+    /// Query typed into the people picker.
+    pub nc_query: String,
+    /// All known contacts (from the name cache).
+    pub nc_people: Vec<Person>,
+    /// Cursor into the filtered results.
+    pub nc_idx: usize,
+    /// People chosen for the new chat (group = 2+).
+    pub nc_chosen: Vec<Person>,
+
     pub status: String,
     pub show_help: bool,
     pub loading: bool,
@@ -134,6 +157,10 @@ impl App {
             focus: Focus::Chats,
             pending_g: false,
             composer: String::new(),
+            nc_query: String::new(),
+            nc_people: Vec::new(),
+            nc_idx: 0,
+            nc_chosen: Vec::new(),
             status: "Loading chats…".to_string(),
             show_help: false,
             loading: true,
@@ -390,6 +417,7 @@ impl App {
             Mode::Normal => self.on_key_normal(key),
             Mode::Insert => self.on_key_insert(key),
             Mode::Search => self.on_key_search(key),
+            Mode::NewChat => self.on_key_new_chat(key),
         }
     }
 
@@ -454,6 +482,15 @@ impl App {
                     self.mode = Mode::Insert;
                     self.status = "-- INSERT -- (Enter to send, Esc to cancel)".to_string();
                 }
+            }
+            KeyCode::Char('n') => {
+                self.mode = Mode::NewChat;
+                self.nc_query.clear();
+                self.nc_chosen.clear();
+                self.nc_idx = 0;
+                self.status = "New chat — type a name, Space to add, Enter to start, Esc to cancel"
+                    .to_string();
+                return Action::LoadPeople;
             }
 
             // --- `g` then `g` = top ---
@@ -581,6 +618,135 @@ impl App {
             }
             _ => Action::None,
         }
+    }
+
+    // ---- new-chat picker ----
+
+    /// Contacts matching the current query (case-insensitive substring on name).
+    pub fn nc_results(&self) -> Vec<&Person> {
+        let needle = self.nc_query.trim().to_lowercase();
+        self.nc_people
+            .iter()
+            .filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle))
+            .collect()
+    }
+
+    fn nc_current(&self) -> Option<Person> {
+        self.nc_results().get(self.nc_idx).map(|p| (*p).clone())
+    }
+
+    fn nc_move(&mut self, delta: isize) {
+        let len = self.nc_results().len();
+        if len == 0 {
+            self.nc_idx = 0;
+            return;
+        }
+        let cur = self.nc_idx as isize;
+        self.nc_idx = (cur + delta).clamp(0, len as isize - 1) as usize;
+    }
+
+    fn nc_toggle_current(&mut self) {
+        if let Some(p) = self.nc_current() {
+            if let Some(pos) = self.nc_chosen.iter().position(|c| c.mri == p.mri) {
+                self.nc_chosen.remove(pos);
+            } else {
+                self.nc_chosen.push(p);
+            }
+        }
+    }
+
+    pub fn nc_is_chosen(&self, mri: &str) -> bool {
+        self.nc_chosen.iter().any(|c| c.mri == mri)
+    }
+
+    /// Replace the picker's contact list (from the name cache).
+    pub fn set_people(&mut self, people: Vec<Person>) {
+        self.nc_people = people;
+        self.nc_idx = 0;
+    }
+
+    /// Add an email-resolved person and select them.
+    pub fn add_resolved_person(&mut self, person: Option<Person>) {
+        match person {
+            Some(p) => {
+                if !self.nc_people.iter().any(|x| x.mri == p.mri) {
+                    self.nc_people.insert(0, p.clone());
+                }
+                if !self.nc_is_chosen(&p.mri) {
+                    self.nc_chosen.push(p.clone());
+                }
+                self.nc_query.clear();
+                self.nc_idx = 0;
+                self.status = format!("Added {}", p.name);
+            }
+            None => self.status = "No match for that email".to_string(),
+        }
+    }
+
+    pub fn cancel_new_chat(&mut self) {
+        self.mode = Mode::Normal;
+        self.nc_query.clear();
+        self.nc_chosen.clear();
+        self.nc_idx = 0;
+        self.status = "Ready".to_string();
+    }
+
+    /// Called when a new chat was created: leave the picker (the main loop opens
+    /// the conversation and refreshes the list).
+    pub fn finish_new_chat(&mut self) {
+        self.mode = Mode::Normal;
+        self.nc_query.clear();
+        self.nc_chosen.clear();
+        self.nc_idx = 0;
+        self.focus = Focus::Messages;
+        self.status = "Started chat".to_string();
+    }
+
+    fn on_key_new_chat(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => self.cancel_new_chat(),
+            KeyCode::Down => self.nc_move(1),
+            KeyCode::Up => self.nc_move(-1),
+            KeyCode::Char('n') if ctrl => self.nc_move(1),
+            KeyCode::Char('p') if ctrl => self.nc_move(-1),
+            // Tab adds/removes the highlighted person (Space is a name character).
+            KeyCode::Tab => self.nc_toggle_current(),
+            KeyCode::Char('r') if ctrl => {
+                let q = self.nc_query.trim().to_string();
+                if q.contains('@') {
+                    self.status = format!("Looking up {q}…");
+                    return Action::ResolvePerson(q);
+                }
+                self.status = "Type a full email, then Ctrl-R to look it up".to_string();
+            }
+            KeyCode::Enter => {
+                let mut members: Vec<String> =
+                    self.nc_chosen.iter().map(|p| p.mri.clone()).collect();
+                if members.is_empty() {
+                    if let Some(p) = self.nc_current() {
+                        members.push(p.mri);
+                    }
+                }
+                if members.is_empty() {
+                    self.status = "Pick at least one person (Tab to add)".to_string();
+                    return Action::None;
+                }
+                let topic = None; // group auto-named by members for now
+                self.status = "Creating chat…".to_string();
+                return Action::CreateChat { members, topic };
+            }
+            KeyCode::Backspace => {
+                self.nc_query.pop();
+                self.nc_idx = 0;
+            }
+            KeyCode::Char(c) => {
+                self.nc_query.push(c);
+                self.nc_idx = 0;
+            }
+            _ => {}
+        }
+        Action::None
     }
 }
 
@@ -810,5 +976,46 @@ mod tests {
         app.on_key(key('k')); // scroll up in messages
         assert_eq!(app.selected, 0); // selection unchanged
         assert!(app.msg_scroll > 0);
+    }
+
+    #[test]
+    fn new_chat_filter_select_and_create() {
+        use crate::teams::people::Person;
+        let mut app = App::new("Me".into());
+        let action = app.on_key(key('n'));
+        assert!(matches!(action, Action::LoadPeople));
+        assert_eq!(app.mode, Mode::NewChat);
+        app.set_people(vec![
+            Person {
+                mri: "8:orgid:a".into(),
+                name: "Alice".into(),
+            },
+            Person {
+                mri: "8:orgid:b".into(),
+                name: "Bob".into(),
+            },
+            Person {
+                mri: "8:orgid:c".into(),
+                name: "Bobby".into(),
+            },
+        ]);
+        app.on_key(key('b'));
+        app.on_key(key('o'));
+        let names: Vec<&str> = app.nc_results().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["Bob", "Bobby"]);
+
+        // Tab adds the highlighted person (Bob).
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert!(app.nc_is_chosen("8:orgid:b"));
+
+        // Enter creates a 1:1 with the chosen member.
+        let action = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        match action {
+            Action::CreateChat { members, topic } => {
+                assert_eq!(members, vec!["8:orgid:b".to_string()]);
+                assert!(topic.is_none());
+            }
+            other => panic!("expected CreateChat, got {other:?}"),
+        }
     }
 }

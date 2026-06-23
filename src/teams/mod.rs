@@ -10,6 +10,7 @@ mod authz;
 pub mod conversations;
 pub mod messages;
 pub mod models;
+pub mod people;
 pub mod profiles;
 
 use std::collections::HashMap;
@@ -216,6 +217,34 @@ impl TeamsClient {
     async fn post_bytes(&self, url: &str, body: Vec<u8>, bearer_resource: &str) -> Result<Vec<u8>> {
         self.send(reqwest::Method::POST, url, Some(body), bearer_resource)
             .await
+    }
+
+    /// POST to the messaging host (skypetoken auth) and return the `Location`
+    /// response header — used by thread creation, where the new thread id is
+    /// returned in `Location` rather than the body.
+    async fn post_for_location(&self, url: &str, body: Vec<u8>) -> Result<Option<String>> {
+        let sa = self.skype_auth().await?;
+        let skype_header = format!("skypetoken={}", sa.skype_token);
+        let resp = self
+            .inner
+            .http
+            .post(url)
+            .header(reqwest::header::AUTHORIZATION, &skype_header)
+            .header("Authentication", &skype_header)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("thread creation failed ({status}): {detail}"));
+        }
+        Ok(resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()))
     }
 
     /// The region-specific messaging host (for building message URLs).
