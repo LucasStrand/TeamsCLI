@@ -32,18 +32,22 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_chat_list(f: &mut Frame, app: &App, area: Rect) {
-    let items: Vec<ListItem> = app
-        .chats
+    let visible = app.visible_chats();
+    let items: Vec<ListItem> = visible
         .iter()
         .map(|c| ListItem::new(c.label.clone()))
         .collect();
 
     let mut state = ListState::default();
-    if !app.chats.is_empty() {
+    if !visible.is_empty() {
         state.select(Some(app.selected));
     }
 
-    let title = format!(" Chats ({}) ", app.chats.len());
+    let title = if app.mode == Mode::Search || !app.filter.is_empty() {
+        format!(" Chats  /{}", app.filter)
+    } else {
+        format!(" Chats ({}) ", visible.len())
+    };
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(
@@ -129,7 +133,7 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
 fn draw_composer(f: &mut Frame, app: &App, area: Rect) {
     let (border_style, title) = match app.mode {
         Mode::Insert => (Style::default().fg(theme::ACCENT), " Compose (Enter ⏎) "),
-        Mode::Normal => (Style::default().fg(theme::MUTED), " Press i to compose "),
+        _ => (Style::default().fg(theme::MUTED), " Press i to compose "),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -149,6 +153,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let mode = match app.mode {
         Mode::Normal => " NORMAL ",
         Mode::Insert => " INSERT ",
+        Mode::Search => " SEARCH ",
     };
     let who = app.display_name.clone();
 
@@ -177,11 +182,11 @@ fn draw_help(f: &mut Frame, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("  j / ↓      move down"),
+        Line::from("  j / ↓      move down (opens chat automatically)"),
         Line::from("  k / ↑      move up"),
-        Line::from("  Enter      open selected chat"),
+        Line::from("  /          search / filter chats"),
         Line::from("  i          compose a message"),
-        Line::from("  Esc        cancel compose"),
+        Line::from("  Esc        cancel compose / clear filter"),
         Line::from("  ?          toggle this help"),
         Line::from("  q / Ctrl-C quit"),
         Line::from(""),

@@ -108,6 +108,12 @@ async fn run_tui(application: &mut App, teams: TeamsClient, cfg: &Config) -> Res
             }
         }
 
+        // Auto-open whatever chat the selection now points at (no Enter needed).
+        if let Some(chat_id) = application.take_pending_open() {
+            application.open_chat(chat_id.clone());
+            app::poller::open_chat(teams.clone(), tx.clone(), chat_id);
+        }
+
         if application.should_quit {
             break;
         }
@@ -126,9 +132,6 @@ fn handle_action(
     match action {
         Action::None => {}
         Action::Quit => application.should_quit = true,
-        Action::OpenChat(chat_id) => {
-            app::poller::open_chat(teams.clone(), tx.clone(), chat_id);
-        }
         Action::SendMessage { chat_id, text } => {
             app::poller::send_message(teams.clone(), tx.clone(), chat_id, text);
         }

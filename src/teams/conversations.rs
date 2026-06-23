@@ -15,7 +15,14 @@ impl TeamsClient {
             "{}/teams/users/me?isPrefetch=false&enableMembershipSummary=true",
             config::CSA_BASE
         );
-        let resp: ConversationsResponse = self.get_json(&url).await?;
+        let bytes = self.send(reqwest::Method::GET, &url, None).await?;
+        // Log the raw payload (debug only) so chat-label field mapping can be
+        // verified/tuned against real responses. Enable with TEAMSCLI_LOG=debug.
+        tracing::debug!(
+            "conversations raw response: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let resp: ConversationsResponse = serde_json::from_slice(&bytes)?;
         Ok(resp.into_summaries())
     }
 }
