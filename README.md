@@ -110,6 +110,7 @@ Navigation is vim-style and acts on the **focused pane** (chat list ↔ messages
 | Key | Action |
 |-----|--------|
 | `Tab` / `h` / `l` | Switch focus between chat list and messages |
+| `Ctrl-B` | Toggle the chat list (full-width message reading) |
 | `j` / `k` | Down / up in the focused pane (selecting a chat opens it) |
 | `Ctrl-D` / `Ctrl-U` | Half-page down / up |
 | `gg` / `G` | Jump to top / bottom |

@@ -8,3 +8,8 @@ pub const ACCENT: Color = Color::Rgb(98, 100, 167);
 pub const OWN: Color = Color::Rgb(120, 160, 120);
 pub const MUTED: Color = Color::DarkGray;
 pub const BG: Color = Color::Black;
+
+/// Subtle fill behind other people's message bubbles (dark purple-gray).
+pub const ACCENT_BG: Color = Color::Rgb(30, 30, 46);
+/// Subtle fill behind your own message bubbles (dark green-gray).
+pub const OWN_BG: Color = Color::Rgb(26, 38, 30);

@@ -6,7 +6,7 @@ mod theme;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, Focus, Mode, Tab};
@@ -26,13 +26,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(f.area());
 
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(32), Constraint::Percentage(68)])
-        .split(root[0]);
+    if app.show_sidebar {
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(32), Constraint::Percentage(68)])
+            .split(root[0]);
 
-    draw_chat_list(f, app, columns[0]);
-    draw_right(f, app, columns[1]);
+        draw_chat_list(f, app, columns[0]);
+        draw_right(f, app, columns[1]);
+    } else {
+        // Sidebar hidden: the message view takes the full width.
+        draw_right(f, app, root[0]);
+    }
     draw_status(f, app, root[1]);
 
     if app.mode == Mode::NewChat {
@@ -183,9 +188,14 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let mut lines: Vec<Line> = Vec::new();
+    // Border-inset content dimensions (needed up front to size bubbles).
+    let inner_w = area.width.saturating_sub(2);
+    let inner_h = area.height.saturating_sub(2);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
     // Group consecutive messages from the same sender, insert day separators,
-    // and align/colour the user's own messages to the right.
+    // and lay each message out as a chat bubble: right-aligned/green for your
+    // own messages, left-aligned/purple for everyone else.
     let mut last_day: Option<String> = None;
     let mut last_key: Option<(bool, String)> = None;
     for msg in &app.messages {
@@ -242,15 +252,7 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
             last_key = Some(key);
         }
 
-        let body_style = if msg.from_me {
-            Style::default().fg(theme::OWN)
-        } else {
-            Style::default()
-        };
-        for text_line in msg.text.lines() {
-            lines
-                .push(Line::from(Span::styled(text_line.to_string(), body_style)).alignment(align));
-        }
+        push_bubble(&mut lines, &msg.text, msg.from_me, inner_w, align);
     }
 
     if lines.is_empty() && app.loading {
@@ -260,15 +262,9 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         )));
     }
 
-    // Border-inset content dimensions.
-    let inner_w = area.width.saturating_sub(2);
-    let inner_h = area.height.saturating_sub(2);
-
-    // Build the paragraph first so we can ask it for the real wrapped line
-    // count (long messages word-wrap into several physical rows — counting the
-    // logical lines would undercount and hide the newest messages).
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
-    let total = para.line_count(inner_w) as u16;
+    // Bubbles are pre-wrapped to their own width, so each logical line is one
+    // physical row — count them directly (no Paragraph re-wrapping).
+    let total = lines.len() as u16;
     let max_scroll = total.saturating_sub(inner_h);
 
     // Clamp the user's scroll offset (rows up from the bottom) to the real
@@ -290,7 +286,7 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         .border_style(border)
         .title(title);
 
-    let para = para.block(block).scroll((top, 0));
+    let para = Paragraph::new(lines).block(block).scroll((top, 0));
     f.render_widget(para, area);
 }
 
@@ -353,6 +349,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from("  Tab / h / l   switch focus (chats ↔ messages)"),
+        Line::from("  Ctrl-B        toggle the chat list (full-width reading)"),
         Line::from("  1 / 2 / 3     tabs: All / DMs / Channels"),
         Line::from("  [ / ]         cycle tabs"),
         Line::from("  j / k         down / up"),
@@ -443,6 +440,91 @@ fn draw_new_chat(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
+/// Append a rounded, subtly-filled chat bubble for one message body. Text is
+/// word-wrapped to at most ~72% of the pane so left/right alignment reads
+/// clearly. `align` controls which edge the bubble hugs.
+fn push_bubble(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    from_me: bool,
+    inner_pane_w: u16,
+    align: Alignment,
+) {
+    let accent = if from_me { theme::OWN } else { theme::ACCENT };
+    let fill = if from_me {
+        theme::OWN_BG
+    } else {
+        theme::ACCENT_BG
+    };
+    let border = Style::default().fg(accent);
+    let body = Style::default().bg(fill);
+
+    let max_text_w = ((inner_pane_w as usize * 72) / 100)
+        .saturating_sub(4)
+        .max(8);
+    let display = if text.trim().is_empty() { "·" } else { text };
+    let wrapped = wrap_text(display, max_text_w);
+    let inner = wrapped
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
+    let bar = "─".repeat(inner + 2);
+    lines.push(Line::from(Span::styled(format!("╭{bar}╮"), border)).alignment(align));
+    for w in wrapped {
+        let padded = format!(" {w:<inner$} ");
+        lines.push(
+            Line::from(vec![
+                Span::styled("│", border),
+                Span::styled(padded, body),
+                Span::styled("│", border),
+            ])
+            .alignment(align),
+        );
+    }
+    lines.push(Line::from(Span::styled(format!("╰{bar}╯"), border)).alignment(align));
+}
+
+/// Word-wrap `text` to `width` columns, preserving explicit newlines and
+/// hard-breaking any single word longer than the width.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    for raw_line in text.split('\n') {
+        let mut cur = String::new();
+        for word in raw_line.split_whitespace() {
+            if word.chars().count() > width {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+                let mut chunk = String::new();
+                for ch in word.chars() {
+                    if chunk.chars().count() == width {
+                        out.push(std::mem::take(&mut chunk));
+                    }
+                    chunk.push(ch);
+                }
+                cur = chunk;
+            } else if cur.is_empty() {
+                cur = word.to_string();
+            } else if cur.chars().count() + 1 + word.chars().count() <= width {
+                cur.push(' ');
+                cur.push_str(word);
+            } else {
+                out.push(std::mem::take(&mut cur));
+                cur = word.to_string();
+            }
+        }
+        out.push(cur);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
 fn format_time(iso: &str) -> String {
     // Render just HH:MM from an ISO-8601 timestamp; fall back to the raw value.
     use chrono::{DateTime, Local};
@@ -488,4 +570,72 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+    use crate::teams::models::Message;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn msg(id: &str, sender: &str, text: &str, from_me: bool) -> Message {
+        Message {
+            id: id.into(),
+            sender: sender.into(),
+            text: text.into(),
+            created: Some("2026-06-23T09:30:00Z".into()),
+            from_me,
+        }
+    }
+
+    /// Render one frame and return the screen as text.
+    fn render(app: &mut App, w: u16, h: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        terminal.backend().to_string()
+    }
+
+    #[test]
+    fn wrap_keeps_newlines_and_breaks_long_words() {
+        assert_eq!(wrap_text("hello world", 5), vec!["hello", "world"]);
+        assert_eq!(wrap_text("a\nb", 10), vec!["a", "b"]);
+        assert_eq!(wrap_text("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn renders_bubbles_with_borders_and_labels() {
+        let mut app = App::new("Me".into());
+        app.loading = false;
+        app.active_chat = Some("chat1".into());
+        app.messages = vec![
+            msg("1", "Anna", "hi there", false),
+            msg("2", "Me", "hello back", true),
+        ];
+        let screen = render(&mut app, 80, 24);
+        assert!(screen.contains('╭'), "expected a bubble top corner");
+        assert!(screen.contains('╰'), "expected a bubble bottom corner");
+        assert!(screen.contains("Anna"), "expected the other sender's label");
+        assert!(screen.contains("You"), "expected the own-message label");
+    }
+
+    #[test]
+    fn ctrl_b_hides_the_chat_list() {
+        let mut app = App::new("Me".into());
+        app.loading = false;
+        app.active_chat = Some("chat1".into());
+        app.messages = vec![msg("1", "Anna", "hi", false)];
+
+        // The All/DMs/Channels tab strip only renders with the sidebar shown.
+        let shown = render(&mut app, 80, 24);
+        assert!(shown.contains("DMs"));
+
+        app.show_sidebar = false;
+        let hidden = render(&mut app, 80, 24);
+        assert!(
+            !hidden.contains("DMs"),
+            "tab strip should be gone with sidebar hidden"
+        );
+    }
 }
