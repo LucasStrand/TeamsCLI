@@ -134,6 +134,9 @@ pub struct App {
 
     pub status: String,
     pub show_help: bool,
+    /// Whether the left chat-list pane is shown (toggle with Ctrl-B for
+    /// full-width reading).
+    pub show_sidebar: bool,
     pub loading: bool,
     /// True while a background poll for the active chat is outstanding.
     pub poll_in_flight: bool,
@@ -163,6 +166,7 @@ impl App {
             nc_chosen: Vec::new(),
             status: "Loading chats…".to_string(),
             show_help: false,
+            show_sidebar: true,
             loading: true,
             poll_in_flight: false,
             should_quit: false,
@@ -457,6 +461,9 @@ impl App {
             KeyCode::Char('?') => {
                 self.show_help = true;
             }
+            // --- layout ---
+            KeyCode::Char('b') if ctrl => self.toggle_sidebar(),
+
             // --- focus switching ---
             KeyCode::Tab => self.focus = toggle_focus(self.focus),
             KeyCode::Char('l') | KeyCode::Right => self.focus = Focus::Messages,
@@ -552,6 +559,15 @@ impl App {
         match self.focus {
             Focus::Chats => self.select_to(usize::MAX),
             Focus::Messages => self.scroll_to_bottom(),
+        }
+    }
+
+    /// Show/hide the chat-list pane. Hiding it moves focus to the messages so
+    /// keyboard navigation still has a target.
+    fn toggle_sidebar(&mut self) {
+        self.show_sidebar = !self.show_sidebar;
+        if !self.show_sidebar {
+            self.focus = Focus::Messages;
         }
     }
 
