@@ -4,12 +4,14 @@
 mod theme;
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, Mode, Tab};
+use crate::teams::models::AttachmentKind;
 
 /// Border style for a pane, brighter when it has keyboard focus.
 fn pane_border(focused: bool) -> Style {
@@ -222,10 +224,10 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
 
         let key = (msg.from_me, msg.sender.clone());
         let new_group = last_key.as_ref() != Some(&key);
-        let accent = if msg.from_me {
-            theme::OWN
+        let (accent, fill) = if msg.from_me {
+            (theme::OWN, theme::OWN_BG)
         } else {
-            theme::ACCENT
+            (theme::ACCENT, theme::ACCENT_BG)
         };
         let align = if msg.from_me {
             Alignment::Right
@@ -252,7 +254,27 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
             last_key = Some(key);
         }
 
-        push_bubble(&mut lines, &msg.text, msg.from_me, inner_w, align);
+        // Text bubble (skipped for image-only messages), then a chip per
+        // attachment beneath it.
+        if !msg.text.is_empty() {
+            push_bubble(&mut lines, &msg.text, accent, fill, inner_w, align);
+        }
+        for att in &msg.attachments {
+            let icon = match att.kind {
+                AttachmentKind::Image => "🖼",
+                AttachmentKind::File => "📎",
+                AttachmentKind::Card => "🗂",
+            };
+            let chip = format!("{icon} {}", att.label);
+            push_bubble(
+                &mut lines,
+                &chip,
+                theme::CHIP,
+                theme::CHIP_BG,
+                inner_w,
+                align,
+            );
+        }
     }
 
     if lines.is_empty() && app.loading {
@@ -440,22 +462,17 @@ fn draw_new_chat(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
-/// Append a rounded, subtly-filled chat bubble for one message body. Text is
-/// word-wrapped to at most ~72% of the pane so left/right alignment reads
-/// clearly. `align` controls which edge the bubble hugs.
+/// Append a rounded, subtly-filled bubble (a message body or an attachment
+/// chip). Text is word-wrapped to at most ~72% of the pane so left/right
+/// alignment reads clearly. `align` controls which edge the bubble hugs.
 fn push_bubble(
     lines: &mut Vec<Line<'static>>,
     text: &str,
-    from_me: bool,
+    accent: Color,
+    fill: Color,
     inner_pane_w: u16,
     align: Alignment,
 ) {
-    let accent = if from_me { theme::OWN } else { theme::ACCENT };
-    let fill = if from_me {
-        theme::OWN_BG
-    } else {
-        theme::ACCENT_BG
-    };
     let border = Style::default().fg(accent);
     let body = Style::default().bg(fill);
 
@@ -464,21 +481,17 @@ fn push_bubble(
         .max(8);
     let display = if text.trim().is_empty() { "·" } else { text };
     let wrapped = wrap_text(display, max_text_w);
-    let inner = wrapped
-        .iter()
-        .map(|l| l.chars().count())
-        .max()
-        .unwrap_or(1)
-        .max(1);
+    // Measure by display width so emoji / CJK (2 cells) don't skew the borders.
+    let inner = wrapped.iter().map(|l| l.width()).max().unwrap_or(1).max(1);
 
     let bar = "─".repeat(inner + 2);
     lines.push(Line::from(Span::styled(format!("╭{bar}╮"), border)).alignment(align));
     for w in wrapped {
-        let padded = format!(" {w:<inner$} ");
+        let pad = " ".repeat(inner.saturating_sub(w.width()));
         lines.push(
             Line::from(vec![
                 Span::styled("│", border),
-                Span::styled(padded, body),
+                Span::styled(format!(" {w}{pad} "), body),
                 Span::styled("│", border),
             ])
             .alignment(align),
@@ -487,34 +500,46 @@ fn push_bubble(
     lines.push(Line::from(Span::styled(format!("╰{bar}╯"), border)).alignment(align));
 }
 
-/// Word-wrap `text` to `width` columns, preserving explicit newlines and
-/// hard-breaking any single word longer than the width.
+/// Word-wrap `text` to `width` display columns, preserving explicit newlines and
+/// hard-breaking any single word wider than the limit. Widths are measured in
+/// terminal cells (emoji / CJK count as 2) so bubble borders stay aligned.
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out: Vec<String> = Vec::new();
     for raw_line in text.split('\n') {
         let mut cur = String::new();
+        let mut cur_w = 0usize;
         for word in raw_line.split_whitespace() {
-            if word.chars().count() > width {
+            let ww = word.width();
+            if ww > width {
                 if !cur.is_empty() {
                     out.push(std::mem::take(&mut cur));
                 }
+                // Hard-break the over-long word by display width.
                 let mut chunk = String::new();
+                let mut chunk_w = 0usize;
                 for ch in word.chars() {
-                    if chunk.chars().count() == width {
+                    let cw = ch.width().unwrap_or(0);
+                    if chunk_w + cw > width {
                         out.push(std::mem::take(&mut chunk));
+                        chunk_w = 0;
                     }
                     chunk.push(ch);
+                    chunk_w += cw;
                 }
                 cur = chunk;
+                cur_w = chunk_w;
             } else if cur.is_empty() {
                 cur = word.to_string();
-            } else if cur.chars().count() + 1 + word.chars().count() <= width {
+                cur_w = ww;
+            } else if cur_w + 1 + ww <= width {
                 cur.push(' ');
                 cur.push_str(word);
+                cur_w += 1 + ww;
             } else {
                 out.push(std::mem::take(&mut cur));
                 cur = word.to_string();
+                cur_w = ww;
             }
         }
         out.push(cur);
@@ -587,6 +612,7 @@ mod tests {
             text: text.into(),
             created: Some("2026-06-23T09:30:00Z".into()),
             from_me,
+            attachments: Vec::new(),
         }
     }
 
@@ -618,6 +644,34 @@ mod tests {
         assert!(screen.contains('╰'), "expected a bubble bottom corner");
         assert!(screen.contains("Anna"), "expected the other sender's label");
         assert!(screen.contains("You"), "expected the own-message label");
+    }
+
+    #[test]
+    fn renders_attachment_chips() {
+        use crate::teams::models::{Attachment, AttachmentKind};
+        let mut app = App::new("Me".into());
+        app.loading = false;
+        app.active_chat = Some("chat1".into());
+        let mut m = msg("1", "Anna", "", false);
+        m.attachments = vec![
+            Attachment {
+                kind: AttachmentKind::Image,
+                label: "cover.png".into(),
+                url: Some("https://eu-api.asm.skype.com/v1/objects/x/views/imgo".into()),
+            },
+            Attachment {
+                kind: AttachmentKind::File,
+                label: "spec.pdf".into(),
+                url: None,
+            },
+        ];
+        app.messages = vec![m];
+        let screen = render(&mut app, 80, 24);
+        assert!(
+            screen.contains("cover.png"),
+            "expected the image chip label"
+        );
+        assert!(screen.contains("spec.pdf"), "expected the file chip label");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use crate::util::strip_html;
+use crate::util::{render_message_html, strip_html};
 
 /// What kind of conversation a sidebar row represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +55,29 @@ pub struct Message {
     pub created: Option<String>,
     /// True when the signed-in user sent this message.
     pub from_me: bool,
+    /// Files, cards, and hosted images carried by the message.
+    pub attachments: Vec<Attachment>,
+}
+
+/// What kind of non-text content a message carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentKind {
+    Image,
+    File,
+    Card,
+}
+
+/// A non-text item shown as a chip beneath the message (and, for images,
+/// rendered inline in a later phase).
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub kind: AttachmentKind,
+    /// Display label for the chip (file name / image name / card title).
+    pub label: String,
+    /// For images: the AMS object URL to fetch with the skypetoken. Captured now
+    /// but only consumed in Phase 7 (inline image rendering).
+    #[allow(dead_code)]
+    pub url: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -378,6 +401,10 @@ pub struct RawMessage {
     pub composetime: Option<String>,
     #[serde(default)]
     pub originalarrivaltime: Option<String>,
+    /// Free-form properties bag; carries `files` / `cards` as JSON strings.
+    /// Kept as a `Value` because shapes vary by account/region.
+    #[serde(default)]
+    pub properties: Option<serde_json::Value>,
 }
 
 impl MessagesResponse {
@@ -427,8 +454,39 @@ impl RawMessage {
             return None;
         }
         let raw = self.content.unwrap_or_default();
-        let text = strip_html(&raw);
-        if text.is_empty() {
+        let (text, images) = render_message_html(&raw);
+
+        // Hosted images first, then files and cards from the properties bag.
+        let mut attachments: Vec<Attachment> = images
+            .into_iter()
+            .map(|img| Attachment {
+                kind: AttachmentKind::Image,
+                label: img.name,
+                url: Some(img.url),
+            })
+            .collect();
+        if let Some(props) = &self.properties {
+            for f in attachment_list(props, "files") {
+                if let Some(label) = pick_label(&f, &["title", "fileName", "name"]) {
+                    attachments.push(Attachment {
+                        kind: AttachmentKind::File,
+                        label,
+                        url: None,
+                    });
+                }
+            }
+            for c in attachment_list(props, "cards") {
+                let label = pick_label(&c, &["title", "name"]).unwrap_or_else(|| "card".into());
+                attachments.push(Attachment {
+                    kind: AttachmentKind::Card,
+                    label,
+                    url: None,
+                });
+            }
+        }
+
+        // Drop only genuinely empty messages (no text and nothing attached).
+        if text.is_empty() && attachments.is_empty() {
             return None;
         }
         let from_me = self
@@ -445,8 +503,30 @@ impl RawMessage {
             text,
             created: self.originalarrivaltime.or(self.composetime),
             from_me,
+            attachments,
         })
     }
+}
+
+/// Pull an attachment list out of the properties bag. The value is usually a
+/// JSON-encoded string (`"[{…}]"`) but may already be an array, so handle both.
+fn attachment_list(props: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
+    match props.get(key) {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
+            serde_json::from_str(s).unwrap_or_default()
+        }
+        Some(serde_json::Value::Array(a)) => a.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// First non-empty string field from `keys` on a JSON object.
+fn pick_label(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|k| value.get(k).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -468,6 +548,34 @@ mod tests {
         assert_eq!(msgs[0].sender, "Ann");
         assert_eq!(msgs[0].text, "hi");
         assert_eq!(msgs[1].text, "yo");
+    }
+
+    #[test]
+    fn parses_image_and_file_attachments() {
+        let json = r#"{"messages":[
+            {"id":"1","messagetype":"RichText/Html","imdisplayname":"Ann",
+             "content":"<div><img itemtype=\"http://schema.skype.com/AMSImage\" src=\"https://eu-api.asm.skype.com/v1/objects/abc/views/imgo\" alt=\"pic.png\"></div>"},
+            {"id":"2","messagetype":"RichText/Html","imdisplayname":"Bob",
+             "content":"<div>see file</div>",
+             "properties":{"files":"[{\"title\":\"Deck.pptx\",\"fileType\":\"pptx\"}]"}}
+        ]}"#;
+        let resp: MessagesResponse = serde_json::from_str(json).unwrap();
+        let msgs = resp.into_messages(None);
+        // The image-only message is kept even though its text is empty.
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs[0].text.is_empty());
+        assert_eq!(msgs[0].attachments.len(), 1);
+        assert_eq!(msgs[0].attachments[0].kind, AttachmentKind::Image);
+        assert_eq!(msgs[0].attachments[0].label, "pic.png");
+        assert!(msgs[0].attachments[0]
+            .url
+            .as_deref()
+            .unwrap()
+            .contains("/v1/objects/abc"));
+        assert_eq!(msgs[1].text, "see file");
+        assert_eq!(msgs[1].attachments.len(), 1);
+        assert_eq!(msgs[1].attachments[0].kind, AttachmentKind::File);
+        assert_eq!(msgs[1].attachments[0].label, "Deck.pptx");
     }
 
     #[test]
