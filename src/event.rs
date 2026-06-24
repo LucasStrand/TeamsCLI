@@ -36,4 +36,8 @@ pub enum Event {
     PersonResolved(Result<Option<Person>, String>),
     /// Result of creating a new chat — the new conversation id.
     ChatCreated(Result<String, String>),
+    /// A hosted image finished downloading: its object URL and raw bytes.
+    ImageLoaded { url: String, bytes: Vec<u8> },
+    /// A hosted image failed to download / decode; its chip stays shown.
+    ImageFailed { url: String },
 }

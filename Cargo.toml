@@ -27,6 +27,20 @@ base64 = "0.22"
 # Correct display width for bubble layout (emoji/CJK are 2 cells)
 unicode-width = "0.2"
 
+# Inline image rendering (kitty/iTerm2/sixel, halfblock fallback) + decoding.
+# Drop the default `chafa-dyn` feature so we don't link system libchafa
+# (keeps builds portable; primitive half-blocks are the fallback).
+ratatui-image = { version = "8", default-features = false, features = [
+    "image-defaults",
+    "crossterm",
+] }
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+] }
+
 # Paths / storage
 directories = "5"
 

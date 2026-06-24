@@ -153,14 +153,20 @@ src/
 │   ├── messages.rs       # read / send messages (messaging host)
 │   └── models.rs  #   public ChatSummary/Message + permissive raw JSON shapes
 ├── app/           # UI-agnostic state machine + async fetch helpers (poller)
-├── ui/            # ratatui rendering (two-pane layout + status bar)
+├── ui/            # ratatui rendering (bubbles, tabs, status bar)
+│   └── images.rs  #   inline image rendering (ratatui-image + Picker/cache)
 ├── event.rs       # unified event enum funneled through one mpsc channel
-├── notify.rs      # desktop notifications (wired up in a later phase)
-└── util.rs        # JWT-claim decode (display name) + HTML→text
+├── notify.rs      # desktop notifications for unfocused chats
+└── util.rs        # JWT-claim decode + HTML→text (keeps emoji, finds images)
 ```
 
 Real-time updates use **polling** (the active chat is re-fetched every few
 seconds), since these endpoints don't offer a practical local push channel.
+
+Messages render as **chat bubbles**; files/cards show as chips and **images
+render inline** — full-resolution on terminals with a graphics protocol (kitty,
+iTerm2, sixel) and unicode half-blocks everywhere else. `Ctrl-B` hides the chat
+list for full-width reading.
 
 ---
 

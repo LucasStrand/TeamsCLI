@@ -57,6 +57,21 @@ pub fn send_message(teams: TeamsClient, tx: UnboundedSender<Event>, chat_id: Str
     });
 }
 
+/// Download a hosted image's bytes, reporting success or failure by URL.
+pub fn fetch_image(teams: TeamsClient, tx: UnboundedSender<Event>, url: String) {
+    tokio::spawn(async move {
+        match teams.fetch_image_bytes(&url).await {
+            Ok(bytes) => {
+                let _ = tx.send(Event::ImageLoaded { url, bytes });
+            }
+            Err(e) => {
+                tracing::debug!("image fetch failed for {url}: {e}");
+                let _ = tx.send(Event::ImageFailed { url });
+            }
+        }
+    });
+}
+
 /// Snapshot known contacts (name cache) for the new-chat picker.
 pub fn load_people(teams: TeamsClient, tx: UnboundedSender<Event>) {
     tokio::spawn(async move {

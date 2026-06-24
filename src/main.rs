@@ -99,6 +99,9 @@ async fn main() -> Result<()> {
 
 async fn run_tui(application: &mut App, teams: TeamsClient, opts: &cli::Options) -> Result<()> {
     let mut terminal = setup_terminal()?;
+    // Probe the terminal for a graphics protocol now — while raw mode is on but
+    // before the input reader starts competing for stdin.
+    let mut images = ui::ImageStore::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
 
     spawn_input_reader(tx.clone());
@@ -117,7 +120,11 @@ async fn run_tui(application: &mut App, teams: TeamsClient, opts: &cli::Options)
     let mut tick_count: u32 = 0;
 
     loop {
-        terminal.draw(|f| ui::draw(f, application))?;
+        terminal.draw(|f| ui::draw(f, application, &mut images))?;
+        // Kick off downloads for any images that became visible this frame.
+        for url in images.take_pending() {
+            app::poller::fetch_image(teams.clone(), tx.clone(), url);
+        }
 
         let Some(ev) = rx.recv().await else { break };
         match ev {
@@ -182,6 +189,8 @@ async fn run_tui(application: &mut App, teams: TeamsClient, opts: &cli::Options)
             Event::ChatCreated(Err(e)) => {
                 application.status = format!("Could not create chat: {e}");
             }
+            Event::ImageLoaded { url, bytes } => images.load(&url, &bytes),
+            Event::ImageFailed { url } => images.fail(&url),
         }
 
         // Auto-open whatever chat the selection now points at (no Enter needed).
