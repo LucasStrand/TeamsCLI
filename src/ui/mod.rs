@@ -1,13 +1,18 @@
 //! Ratatui rendering. A two-pane layout: chat list on the left, message history
 //! and composer on the right, with a status bar along the bottom.
 
+pub mod images;
 mod theme;
+
+use images::ImageState;
+pub use images::ImageStore;
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
+use ratatui_image::StatefulImage;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, Mode, Tab};
@@ -22,7 +27,7 @@ fn pane_border(focused: bool) -> Style {
     }
 }
 
-pub fn draw(f: &mut Frame, app: &mut App) {
+pub fn draw(f: &mut Frame, app: &mut App, images: &mut ImageStore) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -35,10 +40,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             .split(root[0]);
 
         draw_chat_list(f, app, columns[0]);
-        draw_right(f, app, columns[1]);
+        draw_right(f, app, images, columns[1]);
     } else {
         // Sidebar hidden: the message view takes the full width.
-        draw_right(f, app, root[0]);
+        draw_right(f, app, images, root[0]);
     }
     draw_status(f, app, root[1]);
 
@@ -147,17 +152,28 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
+fn draw_right(f: &mut Frame, app: &mut App, images: &mut ImageStore, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(3)])
         .split(area);
 
-    draw_messages(f, app, rows[0]);
+    draw_messages(f, app, images, rows[0]);
     draw_composer(f, app, rows[1]);
 }
 
-fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
+/// An inline image to paint over its reserved blank rows after the transcript
+/// paragraph is drawn.
+struct ImagePlacement {
+    url: String,
+    /// Index of the first reserved line in the transcript.
+    line: usize,
+    cols: u16,
+    rows: u16,
+    align: Alignment,
+}
+
+fn draw_messages(f: &mut Frame, app: &mut App, images: &mut ImageStore, area: Rect) {
     let title = match &app.active_chat {
         Some(_) => {
             let summary = app
@@ -195,6 +211,7 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     let inner_h = area.height.saturating_sub(2);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut placements: Vec<ImagePlacement> = Vec::new();
     // Group consecutive messages from the same sender, insert day separators,
     // and lay each message out as a chat bubble: right-aligned/green for your
     // own messages, left-aligned/purple for everyone else.
@@ -254,12 +271,31 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
             last_key = Some(key);
         }
 
-        // Text bubble (skipped for image-only messages), then a chip per
-        // attachment beneath it.
+        // Text bubble (skipped for image-only messages), then each attachment:
+        // a ready inline image reserves rows for an overlay; everything else
+        // (loading/failed images, files, cards) renders as a chip.
         if !msg.text.is_empty() {
             push_bubble(&mut lines, &msg.text, accent, fill, inner_w, align);
         }
         for att in &msg.attachments {
+            if att.kind == AttachmentKind::Image {
+                if let Some(url) = &att.url {
+                    if let ImageState::Ready { cols, rows, .. } = images.state(url) {
+                        let (cols, rows) = (*cols, *rows);
+                        placements.push(ImagePlacement {
+                            url: url.clone(),
+                            line: lines.len(),
+                            cols,
+                            rows,
+                            align,
+                        });
+                        for _ in 0..rows {
+                            lines.push(Line::from(""));
+                        }
+                        continue;
+                    }
+                }
+            }
             let icon = match att.kind {
                 AttachmentKind::Image => "🖼",
                 AttachmentKind::File => "📎",
@@ -310,6 +346,27 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
 
     let para = Paragraph::new(lines).block(block).scroll((top, 0));
     f.render_widget(para, area);
+
+    // Paint each ready image over its reserved blank rows. To avoid squashing,
+    // only draw when the whole image block fits the current viewport.
+    let view_top = top as usize;
+    let view_bot = view_top + inner_h as usize;
+    for p in &placements {
+        let block_bot = p.line + p.rows as usize;
+        if p.line < view_top || block_bot > view_bot {
+            continue;
+        }
+        let cols = p.cols.min(inner_w);
+        let x = match p.align {
+            Alignment::Right => area.x + 1 + inner_w.saturating_sub(cols),
+            _ => area.x + 1,
+        };
+        let y = area.y + 1 + (p.line as u16 - top);
+        let rect = Rect::new(x, y, cols, p.rows);
+        if let Some(ImageState::Ready { proto, .. }) = images.get_mut(&p.url) {
+            f.render_stateful_widget(StatefulImage::new(), rect, proto.as_mut());
+        }
+    }
 }
 
 fn draw_composer(f: &mut Frame, app: &App, area: Rect) {
@@ -616,11 +673,17 @@ mod tests {
         }
     }
 
+    /// Render one frame with a given image store and return the screen as text.
+    fn render_with(app: &mut App, images: &mut ImageStore, w: u16, h: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw(f, app, images)).unwrap();
+        terminal.backend().to_string()
+    }
+
     /// Render one frame and return the screen as text.
     fn render(app: &mut App, w: u16, h: u16) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-        terminal.draw(|f| draw(f, app)).unwrap();
-        terminal.backend().to_string()
+        let mut images = ImageStore::halfblocks_for_test();
+        render_with(app, &mut images, w, h)
     }
 
     #[test]
@@ -644,6 +707,47 @@ mod tests {
         assert!(screen.contains('╰'), "expected a bubble bottom corner");
         assert!(screen.contains("Anna"), "expected the other sender's label");
         assert!(screen.contains("You"), "expected the own-message label");
+    }
+
+    #[test]
+    fn renders_inline_image_via_halfblocks() {
+        use crate::teams::models::{Attachment, AttachmentKind};
+        let url = "https://eu-api.asm.skype.com/v1/objects/x/views/imgo";
+
+        // A synthetic 16×16 PNG, white on top and black on the bottom. The
+        // vertical contrast makes half-blocks emit '▀' (fg≠bg); a solid color
+        // would render as a colored space, invisible to a text-only snapshot.
+        let mut store = ImageStore::halfblocks_for_test();
+        let img = image::RgbImage::from_fn(16, 16, |_x, y| {
+            if y < 8 {
+                image::Rgb([255, 255, 255])
+            } else {
+                image::Rgb([0, 0, 0])
+            }
+        });
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        store.load(url, &bytes);
+
+        let mut app = App::new("Me".into());
+        app.loading = false;
+        app.active_chat = Some("c".into());
+        let mut m = msg("1", "Anna", "", false);
+        m.attachments = vec![Attachment {
+            kind: AttachmentKind::Image,
+            label: "pic.png".into(),
+            url: Some(url.into()),
+        }];
+        app.messages = vec![m];
+
+        let screen = render_with(&mut app, &mut store, 80, 24);
+        // Half-blocks paint upper-half-block glyphs into the reserved cells.
+        assert!(screen.contains('▀'), "expected half-block image cells");
     }
 
     #[test]

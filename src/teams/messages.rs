@@ -29,6 +29,29 @@ impl TeamsClient {
         Ok(resp.into_messages(me.as_deref()))
     }
 
+    /// Fetch the raw bytes of a hosted (AMS) image. These objects live on the
+    /// `asm.skype.com` hosts and authenticate with the skypetoken — but via the
+    /// `Authorization: skype_token <tok>` scheme, not the messaging host's
+    /// `skypetoken=<tok>` header.
+    pub async fn fetch_image_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let sa = self.skype_auth().await?;
+        let resp = self
+            .inner
+            .http
+            .get(url)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("skype_token {}", sa.skype_token),
+            )
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(anyhow::anyhow!("image fetch failed ({status})"));
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
     /// Send a plain-text message to a conversation.
     pub async fn send_message(&self, conversation_id: &str, text: &str) -> Result<()> {
         let host = self.messaging_host().await?;
