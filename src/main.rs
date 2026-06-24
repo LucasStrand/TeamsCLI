@@ -2,7 +2,9 @@
 
 mod app;
 mod auth;
+mod cli;
 mod config;
+mod doctor;
 mod event;
 mod notify;
 mod teams;
@@ -26,18 +28,52 @@ use ratatui::Terminal;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
 use app::{Action, App};
+use cli::Command;
 use config::Config;
 use event::Event;
 use teams::TeamsClient;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cfg = Config::load()?;
-    init_logging(&cfg);
+    let opts = match cli::parse(std::env::args().skip(1)) {
+        Ok(opts) => opts,
+        Err(e) => {
+            eprintln!("teamscli: {e}\n");
+            eprint!("{}", cli::usage());
+            std::process::exit(2);
+        }
+    };
+
+    // These don't need configuration, a network client, or sign-in.
+    match opts.command {
+        Command::Help => {
+            print!("{}", cli::usage());
+            return Ok(());
+        }
+        Command::Version => {
+            println!("teamscli {}", cli::VERSION);
+            return Ok(());
+        }
+        Command::Run | Command::Doctor => {}
+    }
+
+    let mut cfg = Config::load()?;
+    cfg.message_limit = opts.message_limit;
 
     let http = reqwest::Client::builder()
         .user_agent("TeamsCLI/0.1")
         .build()?;
+
+    // `doctor` prints diagnostics to stdout and exits without touching the TUI.
+    if opts.command == Command::Doctor {
+        let healthy = doctor::run(&cfg, &opts, &http).await;
+        if !healthy {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    init_logging(&cfg, &opts);
 
     // --- Authentication happens before the TUI takes over the terminal. ---
     let tokens = auth::authenticate(&cfg, &http, |dc| {
@@ -55,18 +91,22 @@ async fn main() -> Result<()> {
     let teams = TeamsClient::new(http, cfg.clone(), tokens);
     let mut application = App::new(display_name);
 
-    let result = run_tui(&mut application, teams, &cfg).await;
+    let result = run_tui(&mut application, teams, &opts).await;
 
     // Always restore the terminal, even on error.
     result
 }
 
-async fn run_tui(application: &mut App, teams: TeamsClient, cfg: &Config) -> Result<()> {
+async fn run_tui(application: &mut App, teams: TeamsClient, opts: &cli::Options) -> Result<()> {
     let mut terminal = setup_terminal()?;
     let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
 
     spawn_input_reader(tx.clone());
-    spawn_ticker(tx.clone(), cfg);
+    // The ticker drives background polling; `--no-live` skips it entirely, so
+    // chats load on open but never auto-refresh.
+    if opts.live_refresh {
+        spawn_ticker(tx.clone(), opts.poll_interval_secs);
+    }
 
     // Kick off the initial chat list load.
     app::poller::load_chats(teams.clone(), tx.clone());
@@ -216,9 +256,8 @@ fn spawn_input_reader(tx: UnboundedSender<Event>) {
     });
 }
 
-fn spawn_ticker(tx: UnboundedSender<Event>, cfg: &Config) {
-    let interval = std::time::Duration::from_secs(config::POLL_INTERVAL_SECS);
-    let _ = cfg; // interval currently fixed; cfg reserved for future tuning
+fn spawn_ticker(tx: UnboundedSender<Event>, interval_secs: u64) {
+    let interval = std::time::Duration::from_secs(interval_secs);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         loop {
@@ -252,14 +291,19 @@ fn restore_terminal(terminal: &mut Tui) -> Result<()> {
     Ok(())
 }
 
-fn init_logging(cfg: &Config) {
+fn init_logging(cfg: &Config, opts: &cli::Options) {
     use tracing_subscriber::EnvFilter;
 
     if std::fs::create_dir_all(&cfg.log_dir).is_err() {
         return;
     }
     let file_appender = tracing_appender::rolling::daily(&cfg.log_dir, "teamscli.log");
-    let filter = EnvFilter::try_from_env("TEAMSCLI_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    // An explicit `--log-level` / `--debug` wins over the env var, which wins
+    // over the `info` default.
+    let filter = match &opts.log_level {
+        Some(level) => EnvFilter::new(level.clone()),
+        None => EnvFilter::try_from_env("TEAMSCLI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
+    };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(file_appender)

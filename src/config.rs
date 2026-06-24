@@ -46,11 +46,17 @@ pub const DEFAULT_MESSAGING_HOST: &str = "https://emea.ng.msg.teams.microsoft.co
 /// How often the background poller refreshes the active chat's messages.
 pub const POLL_INTERVAL_SECS: u64 = 4;
 
+/// Default number of messages to request per conversation (overridable with
+/// `--msg`).
+pub const DEFAULT_MESSAGE_LIMIT: usize = 50;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub client_id: String,
     pub token_cache_path: PathBuf,
     pub log_dir: PathBuf,
+    /// Messages requested per conversation (see `--msg`).
+    pub message_limit: usize,
 }
 
 impl Config {
@@ -70,6 +76,7 @@ impl Config {
             client_id,
             token_cache_path: config_dir.join("token.json"),
             log_dir,
+            message_limit: DEFAULT_MESSAGE_LIMIT,
         })
     }
 }
