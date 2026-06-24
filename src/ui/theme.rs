@@ -13,3 +13,8 @@ pub const BG: Color = Color::Black;
 pub const ACCENT_BG: Color = Color::Rgb(30, 30, 46);
 /// Subtle fill behind your own message bubbles (dark green-gray).
 pub const OWN_BG: Color = Color::Rgb(26, 38, 30);
+
+/// Warm accent for attachment chips (files / images / cards).
+pub const CHIP: Color = Color::Rgb(201, 148, 99);
+/// Subtle fill behind attachment chips.
+pub const CHIP_BG: Color = Color::Rgb(38, 31, 24);

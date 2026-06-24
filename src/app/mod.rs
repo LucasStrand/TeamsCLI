@@ -801,6 +801,7 @@ mod tests {
             text: "hi".into(),
             created: Some(created.into()),
             from_me: false,
+            attachments: Vec::new(),
         }
     }
 
