@@ -74,6 +74,11 @@ impl TeamsClient {
         self.inner.me_mri.as_deref()
     }
 
+    /// Messages to request per conversation (from the CLI `--msg` flag).
+    pub fn message_limit(&self) -> usize {
+        self.inner.cfg.message_limit
+    }
+
     /// Merge newly-learned (MRI → name) pairs into the shared name cache.
     pub async fn merge_names(&self, pairs: impl IntoIterator<Item = (String, String)>) {
         let mut cache = self.inner.names.lock().await;

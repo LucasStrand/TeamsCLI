@@ -15,9 +15,10 @@ impl TeamsClient {
     pub async fn get_messages(&self, conversation_id: &str) -> Result<Vec<Message>> {
         let host = self.messaging_host().await?;
         let id = urlencoding::encode(conversation_id);
+        let page_size = self.message_limit();
         let url = format!(
             "{host}/v1/users/ME/conversations/{id}/messages\
-             ?view=msnp24Equivalent%7CsupportsMessageProperties&pageSize=50&startTime=1"
+             ?view=msnp24Equivalent%7CsupportsMessageProperties&pageSize={page_size}&startTime=1"
         );
         // Messaging host uses the skypetoken; the bearer resource is unused.
         let resp: MessagesResponse = self.get_json(&url, config::SKYPE_RESOURCE).await?;

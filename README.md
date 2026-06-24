@@ -71,6 +71,38 @@ cached, so subsequent launches sign you in silently.
 
 ---
 
+## Command-line options
+
+```
+teamscli [OPTIONS]
+teamscli doctor [OPTIONS]
+
+  -h, --help               Show help and exit
+      --version            Show version and exit
+      --msg <N>            Messages to load per conversation (default 50)
+      --log-level <LEVEL>  trace | debug | info | warn | error (default info)
+      --debug              Shortcut for --log-level debug
+      --refresh <SECS>     Background poll interval in seconds (default 4)
+      --no-live            Disable background polling entirely
+```
+
+`--log-level` (and `--debug`) take precedence over the `TEAMSCLI_LOG` env var.
+
+### `doctor`
+
+If sign-in or loading misbehaves, run the built-in diagnostics:
+
+```sh
+teamscli doctor
+```
+
+It checks the build/terminal, that the log directory is writable, the token
+cache (presence + `0600` permissions), TCP reachability of the Teams endpoints,
+and validates your cached credentials with a live silent refresh — then prints a
+`PASS`/`WARN`/`FAIL` summary and exits non-zero if anything failed.
+
+---
+
 ## Keybindings
 
 Navigation is vim-style and acts on the **focused pane** (chat list ↔ messages).
@@ -109,6 +141,8 @@ with `TEAMSCLI_LOG=debug`. To sign out, delete the token cache file.
 ```
 src/
 ├── main.rs        # entry, terminal lifecycle, async event loop
+├── cli.rs         # argument parsing (flags + `doctor` subcommand)
+├── doctor.rs      # preflight diagnostics (tokens, network, config)
 ├── config.rs      # endpoints, first-party client ID, XDG paths
 ├── auth/          # device-code flow (v1) + token cache / silent refresh
 ├── teams/         # internal API client
